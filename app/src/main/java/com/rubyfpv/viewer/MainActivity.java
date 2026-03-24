@@ -12,7 +12,6 @@
 
 package com.rubyfpv.viewer;
 
-import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.graphics.Color;
 import android.media.MediaCodec;
@@ -30,31 +29,18 @@ import android.widget.TextView;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.nio.ByteBuffer;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Receives raw H.264 video stream from a RubyFPV ground station over USB tethering.
  *
- * Ruby sends raw H.264 NAL unit data (no RTP framing) via UDP to port 5001.
- * The phone connects via USB tethering, appearing as a network interface (usb0)
- * on the Ruby station. Ruby discovers the phone's IP and sends video data as
- * UDP datagrams containing raw H.264 byte stream chunks.
- *
- * We reassemble NAL units by scanning for start codes (0x00 0x00 0x00 0x01),
- * then feed complete NAL units to Android's hardware MediaCodec decoder.
+ * Ruby sends raw H.264 byte stream (Annex B format with start codes) via UDP to port 5001.
+ * We accumulate the stream and split on NAL start codes (00 00 00 01 / 00 00 01),
+ * then feed individual NAL units to Android's hardware MediaCodec decoder.
  */
 public class MainActivity extends Activity {
     private static final String TAG = "RubyFPVViewer";
     private static final int UDP_PORT = 5001;
-    private static final int UDP_BUFFER_SIZE = 65536;
     private static final int STREAM_TIMEOUT_MS = 3000;
-    private static final int NAL_BUFFER_SIZE = 2 * 1024 * 1024;
-
-    private final BlockingQueue<NalUnit> nalQueue = new ArrayBlockingQueue<>(64);
-    private final byte[] streamBuffer = new byte[NAL_BUFFER_SIZE];
-    private int streamBufferPos = 0;
 
     private MediaCodec decoder;
     private SurfaceView surfaceView;
@@ -70,10 +56,14 @@ public class MainActivity extends Activity {
     // Stats
     private volatile long bytesReceived;
     private volatile long packetsReceived;
-    private volatile long nalUnitsDecoded;
+    private volatile long nalCount;
     private long lastBytesReceived;
     private long lastPacketsReceived;
-    private long lastNalUnitsDecoded;
+    private long lastNalCount;
+
+    // Stream assembly buffer: accumulates raw H.264 byte stream across UDP packets
+    private final byte[] accumBuffer = new byte[4 * 1024 * 1024];
+    private int accumPos = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -90,7 +80,6 @@ public class MainActivity extends Activity {
 
         hideSystemUI();
 
-        // Toggle stats on tap
         findViewById(R.id.root).setOnClickListener(v -> {
             if (statsText.getVisibility() == View.VISIBLE) {
                 statsText.setVisibility(View.GONE);
@@ -126,22 +115,21 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    // ── UDP Receiver ────────────────────────────────────────────────────
+    // ── UDP Receiver + Decoder (single thread) ──────────────────────────
 
     /**
-     * Ruby sends raw H.264 byte stream in UDP chunks (default 1024 bytes).
-     * The chunks are NOT aligned to NAL boundaries — they're just sequential
-     * slices of the raw H.264 bitstream. We accumulate data and scan for
-     * start codes (0x00 0x00 0x00 0x01) to extract complete NAL units.
+     * Receives UDP packets and decodes video in a single thread.
+     * Accumulates raw H.264 byte stream, splits on NAL start codes,
+     * and feeds individual NAL units directly to MediaCodec.
      */
-    private void udpReceiverThread() {
-        Log.i(TAG, "UDP receiver started on port " + UDP_PORT);
+    private void receiverThread() {
+        Log.i(TAG, "Receiver started on port " + UDP_PORT);
 
         while (running) {
             try (DatagramSocket socket = new DatagramSocket(UDP_PORT)) {
                 socket.setSoTimeout(1000);
                 socket.setReceiveBufferSize(512 * 1024);
-                byte[] buf = new byte[UDP_BUFFER_SIZE];
+                byte[] buf = new byte[65536];
 
                 while (running) {
                     try {
@@ -153,149 +141,150 @@ public class MainActivity extends Activity {
 
                         if (!receiving) {
                             receiving = true;
-                            runOnUiThread(() -> {
-                                statusText.setText("Receiving stream...");
-                            });
+                            runOnUiThread(() -> statusText.setText("Receiving stream..."));
                         }
 
                         lastFrameTime = SystemClock.elapsedRealtime();
                         bytesReceived += len;
                         packetsReceived++;
 
-                        feedStreamData(packet.getData(), 0, len);
+                        // Append to accumulation buffer
+                        if (accumPos + len > accumBuffer.length) {
+                            // Buffer full, reset
+                            Log.w(TAG, "Accum buffer full, resetting");
+                            accumPos = 0;
+                        }
+                        System.arraycopy(packet.getData(), 0, accumBuffer, accumPos, len);
+                        accumPos += len;
+
+                        // Extract and decode complete NAL units
+                        extractAndDecodeNals();
 
                     } catch (java.net.SocketTimeoutException e) {
-                        // Normal timeout, just loop
+                        // Normal timeout
                     }
                 }
             } catch (Exception e) {
-                Log.w(TAG, "UDP receiver error: " + e.getMessage());
+                Log.w(TAG, "Receiver error: " + e.getMessage());
                 SystemClock.sleep(500);
             }
         }
 
-        Log.i(TAG, "UDP receiver stopped");
+        Log.i(TAG, "Receiver stopped");
     }
 
-    // Tracks consecutive zero bytes for start code detection
-    private int zeroCount = 0;
-    private boolean foundFirstStartCode = false;
+    /**
+     * Scan accumulation buffer for complete NAL units and decode them.
+     * A NAL unit starts at a start code and ends just before the next start code.
+     */
+    private void extractAndDecodeNals() {
+        int firstStart = findStartCode(accumBuffer, 0, accumPos);
+        if (firstStart < 0) return;
+
+        int pos = firstStart;
+        while (pos < accumPos) {
+            // Find the start of this NAL (skip past the start code)
+            int scLen = startCodeLength(accumBuffer, pos, accumPos);
+            if (scLen == 0) break;
+
+            int nalDataStart = pos; // Include start code in NAL data
+
+            // Find the next start code (= end of this NAL)
+            int nextStart = findStartCode(accumBuffer, pos + scLen, accumPos);
+
+            if (nextStart < 0) {
+                // No next start code found — NAL is incomplete, keep it in buffer
+                break;
+            }
+
+            // We have a complete NAL from nalDataStart to nextStart
+            int nalLen = nextStart - nalDataStart;
+            if (nalLen > 0) {
+                decodeNal(accumBuffer, nalDataStart, nalLen);
+                nalCount++;
+            }
+
+            pos = nextStart;
+        }
+
+        // Shift remaining data to start of buffer
+        if (pos > 0 && pos < accumPos) {
+            int remaining = accumPos - pos;
+            System.arraycopy(accumBuffer, pos, accumBuffer, 0, remaining);
+            accumPos = remaining;
+        } else if (pos >= accumPos) {
+            accumPos = 0;
+        }
+    }
 
     /**
-     * Feed raw H.264 byte stream data into the NAL unit parser.
-     * Scans for start codes (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01)
-     * and emits complete NAL units to the decode queue.
+     * Find the position of the next start code (00 00 01 or 00 00 00 01)
+     * starting from 'from' within the buffer.
      */
-    private void feedStreamData(byte[] data, int offset, int length) {
-        for (int i = offset; i < offset + length; i++) {
-            byte b = data[i];
-
-            if (b == 0x00) {
-                zeroCount++;
-                if (streamBufferPos < NAL_BUFFER_SIZE) {
-                    streamBuffer[streamBufferPos++] = b;
-                }
-                continue;
-            }
-
-            if (b == 0x01 && zeroCount >= 2) {
-                // Found start code (00 00 01 or 00 00 00 01)
-                // Everything before the zero bytes is the previous NAL unit
-                int nalEnd = streamBufferPos - zeroCount;
-
-                if (foundFirstStartCode && nalEnd > 0) {
-                    // Emit the previous NAL unit (with its start code prefix)
-                    byte[] nal = new byte[nalEnd];
-                    System.arraycopy(streamBuffer, 0, nal, 0, nalEnd);
-                    if (nal.length > 4) {
-                        try {
-                            nalQueue.offer(new NalUnit(nal, nalEnd), 5, TimeUnit.MILLISECONDS);
-                        } catch (InterruptedException e) {
-                            Log.w(TAG, "NAL queue full, dropping");
-                        }
+    private int findStartCode(byte[] buf, int from, int limit) {
+        for (int i = from; i < limit - 2; i++) {
+            if (buf[i] == 0x00 && buf[i + 1] == 0x00) {
+                if (buf[i + 2] == 0x01) {
+                    // 3-byte start code, check if it's actually a 4-byte one
+                    if (i > 0 && buf[i - 1] == 0x00) {
+                        return i - 1; // 4-byte start code starts one byte earlier
                     }
+                    return i;
                 }
-
-                foundFirstStartCode = true;
-
-                // Start new NAL with 4-byte start code
-                streamBuffer[0] = 0x00;
-                streamBuffer[1] = 0x00;
-                streamBuffer[2] = 0x00;
-                streamBuffer[3] = 0x01;
-                streamBufferPos = 4;
-                zeroCount = 0;
-                continue;
-            }
-
-            // Regular byte
-            zeroCount = 0;
-            if (streamBufferPos < NAL_BUFFER_SIZE) {
-                streamBuffer[streamBufferPos++] = b;
-            } else {
-                Log.w(TAG, "NAL buffer overflow, resetting");
-                streamBufferPos = 0;
-                foundFirstStartCode = false;
+                if (i + 3 < limit && buf[i + 2] == 0x00 && buf[i + 3] == 0x01) {
+                    return i; // 4-byte start code
+                }
             }
         }
+        return -1;
+    }
+
+    /**
+     * Returns the length of the start code at the given position (3 or 4), or 0 if none.
+     */
+    private int startCodeLength(byte[] buf, int pos, int limit) {
+        if (pos + 3 < limit && buf[pos] == 0x00 && buf[pos + 1] == 0x00
+                && buf[pos + 2] == 0x00 && buf[pos + 3] == 0x01) {
+            return 4;
+        }
+        if (pos + 2 < limit && buf[pos] == 0x00 && buf[pos + 1] == 0x00
+                && buf[pos + 2] == 0x01) {
+            return 3;
+        }
+        return 0;
     }
 
     // ── Decoder ─────────────────────────────────────────────────────────
 
-    /**
-     * Decode thread: pulls NAL units from the queue and feeds them to MediaCodec.
-     */
-    private void decodeThread() {
-        Log.i(TAG, "Decode thread started");
-
-        while (running) {
-            try {
-                NalUnit nal = nalQueue.poll(10, TimeUnit.MILLISECONDS);
-                if (nal != null) {
-                    decodeNalUnit(nal);
-                }
-            } catch (InterruptedException e) {
-                Log.w(TAG, "Decode interrupted");
-            }
-        }
-
-        Log.i(TAG, "Decode thread stopped");
-    }
-
-    private void decodeNalUnit(NalUnit nal) {
+    private void decodeNal(byte[] data, int offset, int length) {
         if (decoder == null) {
             if (!createDecoder()) return;
         }
 
-        lastFrameTime = SystemClock.elapsedRealtime();
-        nalUnitsDecoded++;
+        // Determine NAL type (byte after start code)
+        int headerOffset = offset + startCodeLength(data, offset, offset + length);
+        if (headerOffset >= offset + length) return;
 
-        // Determine NAL type for H.264
-        // Start code is 0x00 0x00 0x00 0x01, NAL header is next byte
-        int nalType = 0;
-        if (nal.length > 4) {
-            nalType = nal.data[4] & 0x1F; // H.264 NAL unit type
-        }
-
+        int nalType = data[headerOffset] & 0x1F;
         int flag = 0;
-        // SPS (7), PPS (8) are codec config
         if (nalType == 7 || nalType == 8) {
             flag = MediaCodec.BUFFER_FLAG_CODEC_CONFIG;
+            Log.d(TAG, "Codec config NAL type=" + nalType + " len=" + length);
         }
 
         try {
-            int inputId = decoder.dequeueInputBuffer(5000);
+            int inputId = decoder.dequeueInputBuffer(10000);
             if (inputId >= 0) {
                 ByteBuffer inputBuffer = decoder.getInputBuffer(inputId);
                 if (inputBuffer != null) {
                     inputBuffer.clear();
-                    inputBuffer.put(nal.data, 0, nal.length);
+                    inputBuffer.put(data, offset, length);
                     decoder.queueInputBuffer(inputId, 0,
-                            nal.length, System.nanoTime() / 1000, flag);
+                            length, System.nanoTime() / 1000, flag);
                 }
             }
 
-            // Drain all available output buffers
+            // Drain all available output
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             int outputId;
             while ((outputId = decoder.dequeueOutputBuffer(info, 0)) >= 0) {
@@ -324,7 +313,6 @@ public class MainActivity extends Activity {
         try {
             Log.i(TAG, "Creating H.264 decoder");
             MediaFormat format = MediaFormat.createVideoFormat("video/avc", 1280, 720);
-            // Low latency hints
             format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
 
             MediaCodec codec = MediaCodec.createDecoderByType("video/avc");
@@ -332,10 +320,7 @@ public class MainActivity extends Activity {
             codec.start();
             decoder = codec;
 
-            runOnUiThread(() -> {
-                statusText.setVisibility(View.GONE);
-            });
-
+            runOnUiThread(() -> statusText.setVisibility(View.GONE));
             return true;
         } catch (Exception e) {
             Log.e(TAG, "Cannot create decoder: " + e.getMessage());
@@ -370,17 +355,16 @@ public class MainActivity extends Activity {
         });
     }
 
-    // ── Watchdog & Stats ────────────────────────────────────────────────
+    // ── Watchdog ────────────────────────────────────────────────────────
 
     private void watchdogThread() {
         while (running) {
             if (receiving) {
                 if (SystemClock.elapsedRealtime() - lastFrameTime > STREAM_TIMEOUT_MS) {
-                    Log.w(TAG, "Stream timeout — no data for " + STREAM_TIMEOUT_MS + "ms");
+                    Log.w(TAG, "Stream timeout");
                     receiving = false;
                     closeDecoder();
-                    streamBufferPos = 0;
-                    nalQueue.clear();
+                    accumPos = 0;
 
                     runOnUiThread(() -> {
                         surfaceView.setVisibility(View.GONE);
@@ -389,16 +373,14 @@ public class MainActivity extends Activity {
                         statusText.setVisibility(View.VISIBLE);
                     });
                 }
-            }
 
-            // Update stats overlay (per-second rates)
-            if (receiving) {
+                // Update stats (per-second rates)
                 long bpsNow = (bytesReceived - lastBytesReceived) * 8;
                 long pktsNow = packetsReceived - lastPacketsReceived;
-                long nalsNow = nalUnitsDecoded - lastNalUnitsDecoded;
+                long nalsNow = nalCount - lastNalCount;
                 lastBytesReceived = bytesReceived;
                 lastPacketsReceived = packetsReceived;
-                lastNalUnitsDecoded = nalUnitsDecoded;
+                lastNalCount = nalCount;
                 String stats = String.format("%.1f Mbps | %d pkt/s | %d NAL/s",
                         bpsNow / 1_000_000.0, pktsNow, nalsNow);
                 runOnUiThread(() -> statsText.setText(stats));
@@ -412,13 +394,7 @@ public class MainActivity extends Activity {
 
     private void startThreads() {
         Log.i(TAG, "Starting threads");
-
-        new Thread(this::udpReceiverThread, "udp-receiver").start();
-        new Thread(this::decodeThread, "decoder").start();
+        new Thread(this::receiverThread, "receiver").start();
         new Thread(this::watchdogThread, "watchdog").start();
     }
-
-    // ── Data ────────────────────────────────────────────────────────────
-
-    private record NalUnit(byte[] data, int length) {}
 }
