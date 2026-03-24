@@ -33,19 +33,15 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Receives raw H.264 video stream from a RubyFPV ground station over USB tethering.
- *
- * Simplest possible approach: receive UDP packets containing raw H.264 Annex B
- * byte stream, and feed each packet directly to MediaCodec as a chunk.
- * The hardware decoder handles NAL boundary detection internally.
- */
 public class MainActivity extends Activity {
     private static final String TAG = "RubyFPVViewer";
     private static final int UDP_PORT = 5001;
     private static final int STREAM_TIMEOUT_MS = 3000;
+    private static final int BUF_SIZE = 2 * 1024 * 1024;
 
-    private final BlockingQueue<byte[]> packetQueue = new ArrayBlockingQueue<>(256);
+    private final BlockingQueue<byte[]> nalQueue = new ArrayBlockingQueue<>(128);
+    private final byte[] streamBuf = new byte[BUF_SIZE];
+    private int streamPos = 0;
 
     private MediaCodec decoder;
     private SurfaceView surfaceView;
@@ -58,10 +54,10 @@ public class MainActivity extends Activity {
     private int lastWidth;
     private int lastHeight;
 
-    private volatile long bytesReceived;
-    private volatile long packetsReceived;
-    private long prevBytes;
-    private long prevPkts;
+    private volatile long bytesRx;
+    private volatile long pktsRx;
+    private volatile long nalsRx;
+    private long prevBytes, prevPkts, prevNals;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,14 +66,11 @@ public class MainActivity extends Activity {
 
         surfaceView = findViewById(R.id.video_surface);
         surfaceView.setKeepScreenOn(true);
-
         statusText = findViewById(R.id.text_status);
         statusText.setTextColor(Color.LTGRAY);
-
         statsText = findViewById(R.id.text_stats);
 
         hideSystemUI();
-
         findViewById(R.id.root).setOnClickListener(v ->
                 statsText.setVisibility(
                         statsText.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE));
@@ -112,10 +105,10 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    // ── UDP Receiver ────────────────────────────────────────────────────
+    // ── UDP Receive Thread ──────────────────────────────────────────────
 
     private void udpThread() {
-        Log.i(TAG, "UDP thread started on port " + UDP_PORT);
+        Log.i(TAG, "UDP started on port " + UDP_PORT);
         while (running) {
             try (DatagramSocket sock = new DatagramSocket(UDP_PORT)) {
                 sock.setSoTimeout(1000);
@@ -134,15 +127,10 @@ public class MainActivity extends Activity {
                             runOnUiThread(() -> statusText.setText("Receiving..."));
                         }
                         lastFrameTime = SystemClock.elapsedRealtime();
-                        bytesReceived += len;
-                        packetsReceived++;
+                        bytesRx += len;
+                        pktsRx++;
 
-                        // Copy packet data and queue it
-                        byte[] copy = new byte[len];
-                        System.arraycopy(pkt.getData(), 0, copy, 0, len);
-                        if (!packetQueue.offer(copy)) {
-                            Log.w(TAG, "Packet queue full, dropping");
-                        }
+                        processStreamData(pkt.getData(), len);
 
                     } catch (java.net.SocketTimeoutException ignored) {
                     }
@@ -154,41 +142,120 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * Accumulate raw H.264 bytes and extract NAL units.
+     *
+     * We write each byte to streamBuf. After writing, we check if the last
+     * 3 or 4 bytes form a start code (00 00 01 or 00 00 00 01).
+     * When found, everything before the start code is a complete NAL unit.
+     */
+    private void processStreamData(byte[] data, int len) {
+        for (int i = 0; i < len; i++) {
+            if (streamPos >= BUF_SIZE) {
+                Log.w(TAG, "Buffer overflow, resetting");
+                streamPos = 0;
+            }
+
+            // Write byte first
+            streamBuf[streamPos] = data[i];
+            streamPos++;
+
+            // Check if we just completed a start code
+            // 4-byte: 00 00 00 01
+            if (streamPos >= 4
+                    && streamBuf[streamPos - 4] == 0
+                    && streamBuf[streamPos - 3] == 0
+                    && streamBuf[streamPos - 2] == 0
+                    && streamBuf[streamPos - 1] == 1) {
+
+                int nalEnd = streamPos - 4;
+                if (nalEnd > 0) {
+                    emitNal(nalEnd);
+                }
+                // Keep start code at beginning of buffer
+                streamBuf[0] = 0;
+                streamBuf[1] = 0;
+                streamBuf[2] = 0;
+                streamBuf[3] = 1;
+                streamPos = 4;
+                continue;
+            }
+
+            // 3-byte: 00 00 01 (but NOT preceded by another 00, which would be 4-byte)
+            if (streamPos >= 3
+                    && streamBuf[streamPos - 3] == 0
+                    && streamBuf[streamPos - 2] == 0
+                    && streamBuf[streamPos - 1] == 1
+                    && (streamPos < 4 || streamBuf[streamPos - 4] != 0)) {
+
+                int nalEnd = streamPos - 3;
+                if (nalEnd > 0) {
+                    emitNal(nalEnd);
+                }
+                // Normalize to 4-byte start code
+                streamBuf[0] = 0;
+                streamBuf[1] = 0;
+                streamBuf[2] = 0;
+                streamBuf[3] = 1;
+                streamPos = 4;
+            }
+        }
+    }
+
+    private void emitNal(int nalEnd) {
+        // streamBuf[0..nalEnd) is a complete NAL (with start code prefix from previous round)
+        if (nalEnd <= 4) return; // Too short — just a start code with no data
+
+        byte[] nal = new byte[nalEnd];
+        System.arraycopy(streamBuf, 0, nal, 0, nalEnd);
+        nalsRx++;
+
+        if (!nalQueue.offer(nal)) {
+            // Queue full, drop oldest to make room
+            nalQueue.poll();
+            nalQueue.offer(nal);
+        }
+    }
+
     // ── Decode Thread ───────────────────────────────────────────────────
 
     private void decodeThread() {
         Log.i(TAG, "Decode thread started");
         while (running) {
             try {
-                byte[] data = packetQueue.poll(10, TimeUnit.MILLISECONDS);
-                if (data != null) {
-                    feedDecoder(data);
-                }
+                byte[] nal = nalQueue.poll(10, TimeUnit.MILLISECONDS);
+                if (nal != null) decodeNal(nal);
             } catch (InterruptedException ignored) {
             }
         }
     }
 
-    /**
-     * Feed raw H.264 byte stream chunk directly to MediaCodec.
-     * No NAL splitting — let the hardware decoder handle it.
-     */
-    private void feedDecoder(byte[] data) {
+    private void decodeNal(byte[] nal) {
         if (decoder == null && !createDecoder()) return;
 
+        // Find NAL type: byte after the start code (00 00 00 01 XX or 00 00 01 XX)
+        int hdr = 4; // We normalize to 4-byte start codes
+        if (hdr >= nal.length) return;
+
+        int nalType = nal[hdr] & 0x1F;
+        int flag = 0;
+        if (nalType == 7 || nalType == 8) {
+            flag = MediaCodec.BUFFER_FLAG_CODEC_CONFIG;
+            Log.d(TAG, "Config NAL type=" + nalType + " len=" + nal.length);
+        }
+
         try {
-            int inId = decoder.dequeueInputBuffer(5000);
+            int inId = decoder.dequeueInputBuffer(10000);
             if (inId >= 0) {
                 ByteBuffer inBuf = decoder.getInputBuffer(inId);
                 if (inBuf != null) {
                     inBuf.clear();
-                    inBuf.put(data);
-                    decoder.queueInputBuffer(inId, 0, data.length,
-                            System.nanoTime() / 1000, 0);
+                    inBuf.put(nal);
+                    decoder.queueInputBuffer(inId, 0, nal.length,
+                            System.nanoTime() / 1000, flag);
                 }
             }
 
-            // Drain all output
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             int outId;
             while ((outId = decoder.dequeueOutputBuffer(info, 0)) >= 0) {
@@ -211,16 +278,12 @@ public class MainActivity extends Activity {
     private boolean createDecoder() {
         Surface surface = surfaceView.getHolder().getSurface();
         if (!surface.isValid()) return false;
-
         try {
-            Log.i(TAG, "Creating H.264 decoder");
             MediaFormat fmt = MediaFormat.createVideoFormat("video/avc", 1280, 720);
-
             MediaCodec mc = MediaCodec.createDecoderByType("video/avc");
             mc.configure(fmt, surface, null, 0);
             mc.start();
             decoder = mc;
-
             Log.i(TAG, "Decoder created");
             runOnUiThread(() -> statusText.setVisibility(View.GONE));
             return true;
@@ -256,7 +319,8 @@ public class MainActivity extends Activity {
             if (receiving && SystemClock.elapsedRealtime() - lastFrameTime > STREAM_TIMEOUT_MS) {
                 receiving = false;
                 closeDecoder();
-                packetQueue.clear();
+                streamPos = 0;
+                nalQueue.clear();
                 runOnUiThread(() -> {
                     surfaceView.setVisibility(View.GONE);
                     surfaceView.setVisibility(View.VISIBLE);
@@ -266,14 +330,16 @@ public class MainActivity extends Activity {
             }
 
             if (receiving) {
-                long db = bytesReceived - prevBytes;
-                long dp = packetsReceived - prevPkts;
-                prevBytes = bytesReceived;
-                prevPkts = packetsReceived;
-                String s = String.format("%.1f Mbps | %d pkt/s", db * 8 / 1_000_000.0, dp);
+                long db = bytesRx - prevBytes;
+                long dp = pktsRx - prevPkts;
+                long dn = nalsRx - prevNals;
+                prevBytes = bytesRx;
+                prevPkts = pktsRx;
+                prevNals = nalsRx;
+                String s = String.format("%.1f Mbps | %d pkt/s | %d NAL/s",
+                        db * 8 / 1_000_000.0, dp, dn);
                 runOnUiThread(() -> statsText.setText(s));
             }
-
             SystemClock.sleep(1000);
         }
     }
