@@ -174,63 +174,66 @@ public class MainActivity extends Activity {
         Log.i(TAG, "UDP receiver stopped");
     }
 
+    // Tracks consecutive zero bytes for start code detection
+    private int zeroCount = 0;
+    private boolean foundFirstStartCode = false;
+
     /**
      * Feed raw H.264 byte stream data into the NAL unit parser.
-     * Scans for start codes and emits complete NAL units to the decode queue.
+     * Scans for start codes (0x00 0x00 0x01 or 0x00 0x00 0x00 0x01)
+     * and emits complete NAL units to the decode queue.
      */
     private void feedStreamData(byte[] data, int offset, int length) {
         for (int i = offset; i < offset + length; i++) {
-            // Check for NAL start code: 0x00 0x00 0x00 0x01
-            if (streamBufferPos >= 4) {
-                if (streamBuffer[streamBufferPos - 3] == 0x00
-                        && streamBuffer[streamBufferPos - 2] == 0x00
-                        && streamBuffer[streamBufferPos - 1] == 0x00
-                        && data[i] == 0x01) {
+            byte b = data[i];
 
-                    // Found a start code. Everything before it (minus the 3 zero bytes)
-                    // is the previous NAL unit.
-                    int nalEnd = streamBufferPos - 3;
-                    if (nalEnd > 4) {
-                        // We have a complete previous NAL unit (skip the very first partial)
-                        emitNalUnit(streamBuffer, 0, nalEnd);
-                    }
-
-                    // Start new NAL: write start code
-                    streamBuffer[0] = 0x00;
-                    streamBuffer[1] = 0x00;
-                    streamBuffer[2] = 0x00;
-                    streamBuffer[3] = 0x01;
-                    streamBufferPos = 4;
-                    continue;
+            if (b == 0x00) {
+                zeroCount++;
+                if (streamBufferPos < NAL_BUFFER_SIZE) {
+                    streamBuffer[streamBufferPos++] = b;
                 }
+                continue;
             }
 
-            // Accumulate byte
+            if (b == 0x01 && zeroCount >= 2) {
+                // Found start code (00 00 01 or 00 00 00 01)
+                // Everything before the zero bytes is the previous NAL unit
+                int nalEnd = streamBufferPos - zeroCount;
+
+                if (foundFirstStartCode && nalEnd > 0) {
+                    // Emit the previous NAL unit (with its start code prefix)
+                    byte[] nal = new byte[nalEnd];
+                    System.arraycopy(streamBuffer, 0, nal, 0, nalEnd);
+                    if (nal.length > 4) {
+                        try {
+                            nalQueue.offer(new NalUnit(nal, nalEnd), 5, TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException e) {
+                            Log.w(TAG, "NAL queue full, dropping");
+                        }
+                    }
+                }
+
+                foundFirstStartCode = true;
+
+                // Start new NAL with 4-byte start code
+                streamBuffer[0] = 0x00;
+                streamBuffer[1] = 0x00;
+                streamBuffer[2] = 0x00;
+                streamBuffer[3] = 0x01;
+                streamBufferPos = 4;
+                zeroCount = 0;
+                continue;
+            }
+
+            // Regular byte
+            zeroCount = 0;
             if (streamBufferPos < NAL_BUFFER_SIZE) {
-                streamBuffer[streamBufferPos++] = data[i];
+                streamBuffer[streamBufferPos++] = b;
             } else {
-                // Buffer overflow — reset and wait for next start code
                 Log.w(TAG, "NAL buffer overflow, resetting");
                 streamBufferPos = 0;
+                foundFirstStartCode = false;
             }
-        }
-    }
-
-    /**
-     * Also handle 3-byte start code variant: 0x00 0x00 0x01
-     * and the 4-byte variant detected above. This method checks
-     * the accumulated buffer for both.
-     */
-    private void emitNalUnit(byte[] buffer, int offset, int length) {
-        if (length <= 4) return;
-
-        byte[] nal = new byte[length];
-        System.arraycopy(buffer, offset, nal, 0, length);
-
-        try {
-            nalQueue.offer(new NalUnit(nal, length), 5, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            Log.w(TAG, "NAL queue full, dropping frame");
         }
     }
 
@@ -289,10 +292,10 @@ public class MainActivity extends Activity {
                 }
             }
 
+            // Drain all available output buffers
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            int outputId = decoder.dequeueOutputBuffer(info, 0);
-
-            if (outputId >= 0) {
+            int outputId;
+            while ((outputId = decoder.dequeueOutputBuffer(info, 0)) >= 0) {
                 MediaFormat format = decoder.getOutputFormat(outputId);
                 int width = format.getInteger(MediaFormat.KEY_WIDTH);
                 int height = format.getInteger(MediaFormat.KEY_HEIGHT);
