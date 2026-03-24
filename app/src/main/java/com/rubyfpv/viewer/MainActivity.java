@@ -71,6 +71,9 @@ public class MainActivity extends Activity {
     private volatile long bytesReceived;
     private volatile long packetsReceived;
     private volatile long nalUnitsDecoded;
+    private long lastBytesReceived;
+    private long lastPacketsReceived;
+    private long lastNalUnitsDecoded;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -388,11 +391,16 @@ public class MainActivity extends Activity {
                 }
             }
 
-            // Update stats overlay
+            // Update stats overlay (per-second rates)
             if (receiving) {
-                long bps = bytesReceived * 8;
-                String stats = String.format("%.1f Mbps | %d pkts | %d NALs",
-                        bps / 1_000_000.0, packetsReceived, nalUnitsDecoded);
+                long bpsNow = (bytesReceived - lastBytesReceived) * 8;
+                long pktsNow = packetsReceived - lastPacketsReceived;
+                long nalsNow = nalUnitsDecoded - lastNalUnitsDecoded;
+                lastBytesReceived = bytesReceived;
+                lastPacketsReceived = packetsReceived;
+                lastNalUnitsDecoded = nalUnitsDecoded;
+                String stats = String.format("%.1f Mbps | %d pkt/s | %d NAL/s",
+                        bpsNow / 1_000_000.0, pktsNow, nalsNow);
                 runOnUiThread(() -> statsText.setText(stats));
             }
 
