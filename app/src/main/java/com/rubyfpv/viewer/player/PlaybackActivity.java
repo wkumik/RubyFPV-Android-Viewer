@@ -1,16 +1,19 @@
 package com.rubyfpv.viewer.player;
 
-import android.media.MediaPlayer;
+import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
-import android.widget.MediaController;
 import android.widget.Toast;
-import android.widget.VideoView;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.FileProvider;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.ui.PlayerView;
 
 import com.google.android.material.appbar.MaterialToolbar;
 import com.rubyfpv.viewer.R;
@@ -18,15 +21,19 @@ import com.rubyfpv.viewer.R;
 import java.io.File;
 
 /**
- * Plays a downloaded/remuxed clip with the platform {@link VideoView} (hardware
- * HEVC decode + reliable seeking on the MP4). Share action re-uses the same file.
+ * Plays a downloaded/remuxed clip with ExoPlayer (media3). ExoPlayer reads the
+ * file in-process, so app-private files in {@code Android/data/<pkg>/} play fine —
+ * unlike {@code MediaPlayer}/{@code VideoView}, whose {@code mediaserver} process
+ * can't open them ("no video player available"). It also demuxes raw {@code .ts}
+ * if the remux to MP4 failed.
  */
 public class PlaybackActivity extends AppCompatActivity {
 
     public static final String EXTRA_PATH = "path";
     public static final String EXTRA_TITLE = "title";
 
-    private VideoView video;
+    private ExoPlayer player;
+    private PlayerView playerView;
     private File file;
 
     @Override
@@ -47,50 +54,59 @@ public class PlaybackActivity extends AppCompatActivity {
             return false;
         });
 
-        video = findViewById(R.id.video);
-        MediaController controller = new MediaController(this);
-        controller.setAnchorView(video);
-        video.setMediaController(controller);
-        video.setVideoURI(Uri.fromFile(file));
-        video.setOnPreparedListener(mp -> {
-            mp.setLooping(false);
-            video.start();
-        });
-        video.setOnErrorListener((mp, what, extra) -> {
-            Toast.makeText(this, R.string.toast_no_player, Toast.LENGTH_LONG).show();
-            return true;
-        });
+        playerView = findViewById(R.id.player_view);
+        // Mirror the controller visibility onto the toolbar for a clean look.
+        playerView.setControllerVisibilityListener(
+                (PlayerView.ControllerVisibilityListener) visibility ->
+                        toolbar.setVisibility(visibility));
+    }
 
-        // Tap toggles the system bars / toolbar for an immersive look.
-        findViewById(R.id.player_root).setOnClickListener(v -> {
-            boolean shown = toolbar.getVisibility() == View.VISIBLE;
-            toolbar.setVisibility(shown ? View.GONE : View.VISIBLE);
+    private void initPlayer() {
+        if (player != null) return;
+        player = new ExoPlayer.Builder(this).build();
+        playerView.setPlayer(player);
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                Toast.makeText(PlaybackActivity.this,
+                        "Playback error: " + error.getErrorCodeName(), Toast.LENGTH_LONG).show();
+            }
         });
+        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)));
+        player.prepare();
+        player.setPlayWhenReady(true);
+    }
+
+    private void releasePlayer() {
+        if (player != null) {
+            player.release();
+            player = null;
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        initPlayer();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        releasePlayer();
     }
 
     private void share() {
         try {
             Uri uri = FileProvider.getUriForFile(
                     this, getPackageName() + ".fileprovider", file);
-            android.content.Intent send = new android.content.Intent(android.content.Intent.ACTION_SEND);
+            Intent send = new Intent(Intent.ACTION_SEND);
             send.setType("video/mp4");
-            send.putExtra(android.content.Intent.EXTRA_STREAM, uri);
-            send.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(android.content.Intent.createChooser(send, getString(R.string.share_title)));
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(send, getString(R.string.share_title)));
         } catch (Exception e) {
             Toast.makeText(this, R.string.toast_share_failed, Toast.LENGTH_SHORT).show();
         }
-    }
-
-    @Override
-    protected void onPause() {
-        super.onPause();
-        if (video != null && video.isPlaying()) video.pause();
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (video != null) video.stopPlayback();
     }
 }

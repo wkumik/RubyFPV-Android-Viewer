@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/ctx_play" android:title="@string/action_play" />
+    <item android:id="@+id/ctx_download" android:title="@string/action_download" />
+    <item android:id="@+id/ctx_share" android:title="@string/action_share" />
+    <item android:id="@+id/ctx_delete" android:title="@string/action_delete" />
+</menu>

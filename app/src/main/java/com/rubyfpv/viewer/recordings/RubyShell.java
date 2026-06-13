@@ -154,6 +154,32 @@ public class RubyShell {
         return total;
     }
 
+    /**
+     * Pull only the first {@code bytes} of a remote file (for a thumbnail). The
+     * clip starts on a keyframe, so the first few MB contain a decodable frame.
+     */
+    public long downloadPrefix(String remoteName, int bytes, File dest) throws Exception {
+        String cmd = "head -c " + bytes + " '" + REMOTE_DIR + "/" + remoteName + "'";
+        ChannelExec ch = (ChannelExec) session.openChannel("exec");
+        ch.setCommand(cmd);
+        ch.setInputStream(null);
+        InputStream in = ch.getInputStream();
+        long total = 0;
+        try (OutputStream fout = new FileOutputStream(dest)) {
+            ch.connect();
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                fout.write(buf, 0, n);
+                total += n;
+            }
+            fout.flush();
+        } finally {
+            disconnect(ch);
+        }
+        return total;
+    }
+
     /** Delete one or more files from the recordings dir. */
     public void delete(String... names) throws Exception {
         StringBuilder sb = new StringBuilder("rm -f");

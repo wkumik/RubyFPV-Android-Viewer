@@ -6,11 +6,13 @@
     android:layout_height="match_parent"
     android:background="@android:color/black">
 
-    <VideoView
-        android:id="@+id/video"
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_gravity="center" />
+        app:resize_mode="fit"
+        app:show_buffering="when_playing"
+        app:use_controller="true" />
 
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/player_toolbar"

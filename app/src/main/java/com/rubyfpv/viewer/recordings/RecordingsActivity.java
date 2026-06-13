@@ -15,6 +15,10 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
@@ -31,9 +35,11 @@ import com.rubyfpv.viewer.player.PlaybackActivity;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -54,8 +60,11 @@ public class RecordingsActivity extends AppCompatActivity
     private final ExecutorService work = Executors.newSingleThreadExecutor();
 
     private final Map<String, Recording> byStem = new LinkedHashMap<>();
+    private final Set<String> prefetching = Collections.synchronizedSet(new HashSet<>());
     private RecordingsAdapter adapter;
 
+    private MaterialToolbar toolbar;
+    private RecyclerView list;
     private View statusDot;
     private TextView statusText;
     private MaterialButton btnConnect;
@@ -67,7 +76,10 @@ public class RecordingsActivity extends AppCompatActivity
     private RubyShell shell;
     private WifiJoiner wifi;
     private volatile boolean connected;
+    private boolean compact;
     private File dir;
+    private File thumbsDir;
+    private File cacheDir;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -79,9 +91,16 @@ public class RecordingsActivity extends AppCompatActivity
         dir = new File(base, "recordings");
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
+        thumbsDir = new File(getFilesDir(), "thumbs");
+        //noinspection ResultOfMethodCallIgnored
+        thumbsDir.mkdirs();
+        cacheDir = getCacheDir();
         wifi = new WifiJoiner(this);
 
-        MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        compact = prefs.getBoolean("compact", false);
+
+        toolbar = findViewById(R.id.toolbar);
         toolbar.setOnMenuItemClickListener(this::onMenu);
 
         statusDot = findViewById(R.id.status_dot);
@@ -94,9 +113,12 @@ public class RecordingsActivity extends AppCompatActivity
         loading = findViewById(R.id.loading);
 
         adapter = new RecordingsAdapter(this);
-        RecyclerView list = findViewById(R.id.list);
-        list.setLayoutManager(new LinearLayoutManager(this));
+        adapter.setCompact(compact);
+        list = findViewById(R.id.list);
         list.setAdapter(adapter);
+        applyLayoutManager();
+        updateLayoutIcon();
+        applyInsets();
 
         swipe.setColorSchemeColors(ContextCompat.getColor(this, R.color.ruby));
         swipe.setProgressBackgroundColorSchemeColor(ContextCompat.getColor(this, R.color.surface));
@@ -110,15 +132,59 @@ public class RecordingsActivity extends AppCompatActivity
             else connect();
         });
 
+        // Preload any thumbnails we cached on previous sessions.
+        work.execute(() -> {
+            Thumbs.loadDiskInto(thumbsDir);
+            ui.post(() -> adapter.notifyDataSetChanged());
+        });
+
         loadLocal();
         setStatus(StatusKind.OFFLINE, getString(R.string.status_disconnected));
+    }
+
+    /** Pad the app bar for the status bar and the list for the nav bar (edge-to-edge). */
+    private void applyInsets() {
+        View appbar = findViewById(R.id.appbar);
+        ViewCompat.setOnApplyWindowInsetsListener(appbar, (v, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            v.setPadding(v.getPaddingLeft(), bars.top, v.getPaddingRight(), v.getPaddingBottom());
+            return insets;
+        });
+        final int basePad = list.getPaddingBottom();
+        ViewCompat.setOnApplyWindowInsetsListener(list, (v, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            v.setPadding(v.getPaddingLeft(), v.getPaddingTop(), v.getPaddingRight(),
+                    basePad + bars.bottom);
+            return insets;
+        });
+    }
+
+    private void applyLayoutManager() {
+        list.setLayoutManager(compact
+                ? new GridLayoutManager(this, 2)
+                : new LinearLayoutManager(this));
+    }
+
+    private void updateLayoutIcon() {
+        if (toolbar.getMenu() != null && toolbar.getMenu().findItem(R.id.menu_layout) != null) {
+            toolbar.getMenu().findItem(R.id.menu_layout)
+                    .setIcon(compact ? R.drawable.ic_list : R.drawable.ic_grid);
+        }
     }
 
     // ── Menu ────────────────────────────────────────────────────────────
 
     private boolean onMenu(android.view.MenuItem item) {
         int id = item.getItemId();
-        if (id == R.id.menu_refresh) {
+        if (id == R.id.menu_layout) {
+            compact = !compact;
+            getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putBoolean("compact", compact).apply();
+            applyLayoutManager();
+            adapter.setCompact(compact);
+            updateLayoutIcon();
+            return true;
+        } else if (id == R.id.menu_refresh) {
             if (connected) refresh(); else connect();
             return true;
         } else if (id == R.id.menu_live) {
@@ -227,6 +293,39 @@ public class RecordingsActivity extends AppCompatActivity
         }
         for (String k : drop) byStem.remove(k);
         refreshUi();
+        prefetchThumbs();
+    }
+
+    /** Fetch a small .ts prefix for any clip lacking a cached thumbnail. */
+    private void prefetchThumbs() {
+        if (!connected || shell == null) return;
+        for (Recording r : byStem.values()) {
+            if (r.tsName == null) continue;
+            if (Thumbs.CACHE.get(r.stem) != null) continue;
+            prefetchThumb(r);
+        }
+    }
+
+    private void prefetchThumb(Recording r) {
+        if (!prefetching.add(r.stem)) return;   // already queued
+        io.execute(() -> {
+            File part = new File(cacheDir, r.stem + ".tspart");
+            try {
+                if (shell == null || Thumbs.CACHE.get(r.stem) != null) return;
+                shell.downloadPrefix(r.tsName, 4 * 1024 * 1024, part);
+                Thumbs.Meta m = Thumbs.extract(part, r.stem);   // bitmap only; duration is partial
+                if (m.bitmap != null) {
+                    Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
+                    ui.post(() -> adapter.update(r));
+                }
+            } catch (Exception ignored) {
+                // best-effort; clip just shows the placeholder
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                prefetching.remove(r.stem);
+            }
+        });
     }
 
     // ── Local scan ──────────────────────────────────────────────────────
@@ -259,6 +358,7 @@ public class RecordingsActivity extends AppCompatActivity
         final File f = r.localFile;
         work.execute(() -> {
             Thumbs.Meta m = Thumbs.extract(f, r.stem);
+            if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
             ui.post(() -> {
                 if (m.durationMs > 0) r.durationMs = m.durationMs;
                 adapter.update(r);
@@ -324,6 +424,7 @@ public class RecordingsActivity extends AppCompatActivity
                 playable = ts; // fall back to playing the .ts directly
             }
             Thumbs.Meta m = Thumbs.extract(playable, r.stem);
+            if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
             ui.post(() -> {
                 r.localFile = playable;
                 r.durationMs = m.durationMs;
@@ -381,6 +482,9 @@ public class RecordingsActivity extends AppCompatActivity
             });
         }
         Thumbs.CACHE.remove(r.stem);
+        File thumb = new File(thumbsDir, r.stem + ".jpg");
+        if (thumb.exists()) //noinspection ResultOfMethodCallIgnored
+            thumb.delete();
         byStem.remove(r.stem);
         refreshUi();
     }

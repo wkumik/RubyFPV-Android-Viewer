@@ -5,6 +5,7 @@
     <string name="menu_live_view">Live view (USB)</string>
     <string name="menu_connection">Connection settings</string>
     <string name="menu_refresh">Refresh</string>
+    <string name="menu_layout">Grid / list</string>
 
     <string name="connect">Connect</string>
     <string name="disconnect">Disconnect</string>

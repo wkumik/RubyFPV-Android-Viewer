@@ -33,4 +33,6 @@ dependencies {
     implementation libs.constraintlayout
     implementation libs.swiperefreshlayout
     implementation libs.jsch
+    implementation libs.media3.exoplayer
+    implementation libs.media3.ui
 }
