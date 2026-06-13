@@ -101,6 +101,8 @@ public class RecordingsActivity extends AppCompatActivity
         compact = prefs.getBoolean("compact", false);
 
         toolbar = findViewById(R.id.toolbar);
+        toolbar.setSubtitle("v" + com.rubyfpv.viewer.BuildConfig.VERSION_NAME
+                + " (" + com.rubyfpv.viewer.BuildConfig.VERSION_CODE + ")");
         toolbar.setOnMenuItemClickListener(this::onMenu);
 
         statusDot = findViewById(R.id.status_dot);
