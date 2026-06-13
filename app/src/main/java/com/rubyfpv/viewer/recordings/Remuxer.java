@@ -32,6 +32,7 @@ public final class Remuxer {
         try {
             extractor.setDataSource(src.getAbsolutePath());
             int trackCount = extractor.getTrackCount();
+            DebugLog.add("    remux: extractor tracks=" + trackCount);
             int[] muxIndex = new int[trackCount];
             int maxInput = 1 << 20; // 1 MB floor
 

@@ -25,4 +25,10 @@
         android:icon="@drawable/ic_settings"
         android:title="@string/menu_connection"
         app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menu_diagnostics"
+        android:icon="@drawable/ic_settings"
+        android:title="@string/menu_diagnostics"
+        app:showAsAction="never" />
 </menu>

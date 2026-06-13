@@ -4,6 +4,7 @@
     <string name="recordings_title">Recordings</string>
     <string name="menu_live_view">Live view (USB)</string>
     <string name="menu_connection">Connection settings</string>
+    <string name="menu_diagnostics">Diagnostics</string>
     <string name="menu_refresh">Refresh</string>
     <string name="menu_layout">Grid / list</string>
 

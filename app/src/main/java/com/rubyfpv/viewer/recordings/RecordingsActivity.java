@@ -1,5 +1,7 @@
 package com.rubyfpv.viewer.recordings;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -7,7 +9,9 @@ import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.TypedValue;
 import android.view.View;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -195,8 +199,46 @@ public class RecordingsActivity extends AppCompatActivity
         } else if (id == R.id.menu_connection) {
             showConnectionDialog();
             return true;
+        } else if (id == R.id.menu_diagnostics) {
+            showDiagnosticsDialog();
+            return true;
         }
         return false;
+    }
+
+    /** Show the in-app {@link DebugLog} ring buffer so the thumbnail/transfer pipeline
+     *  can be inspected on-device (no adb), with a Copy button to paste it back out. */
+    private void showDiagnosticsDialog() {
+        final String dump = DebugLog.dump();
+
+        TextView tv = new TextView(this);
+        tv.setText(dump);
+        tv.setTextIsSelectable(true);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        int pad = Math.round(16 * getResources().getDisplayMetrics().density);
+        tv.setPadding(pad, pad, pad, pad);
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Diagnostics")
+                .setView(sv)
+                .setNeutralButton("Clear", (d, w) -> {
+                    DebugLog.clear();
+                    Toast.makeText(this, "Diagnostics cleared", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("Copy", (d, w) -> {
+                    ClipboardManager cb =
+                            (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cb != null) {
+                        cb.setPrimaryClip(ClipData.newPlainText("RubyFPV diagnostics", dump));
+                        Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setPositiveButton("Close", null)
+                .show();
     }
 
     // ── Connection ──────────────────────────────────────────────────────

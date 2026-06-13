@@ -58,20 +58,26 @@ public final class Thumbs {
 
     public static Meta extract(File file, String stem) {
         Meta m = new Meta();
+        String id = stem != null ? stem : file.getName();
+        DebugLog.add("extract " + id + " (" + file.length() + " B)");
 
         // 1) MMR directly (works for .mp4)
         m.bitmap = mmrFrame(file);
         m.durationMs = mmrDuration(file);
         String how = "mmr";
+        DebugLog.add("  mmr-direct: " + (m.bitmap != null ? "OK" : "null"));
 
         // 2) remux to a small .mp4 then MMR (the .ts / prefix path)
         if (m.bitmap == null) {
             File tmp = new File(file.getAbsolutePath() + ".thumb.mp4");
             try {
-                if (Remuxer.remux(file, tmp)) {
+                boolean rx = Remuxer.remux(file, tmp);
+                DebugLog.add("  remux: " + (rx ? ("OK " + tmp.length() + " B") : "FAIL"));
+                if (rx) {
                     m.bitmap = mmrFrame(tmp);
                     if (m.durationMs <= 0) m.durationMs = mmrDuration(tmp);
                     how = "remux+mmr";
+                    DebugLog.add("  mmr-on-remux: " + (m.bitmap != null ? "OK" : "null"));
                 }
             } finally {
                 //noinspection ResultOfMethodCallIgnored
@@ -83,14 +89,15 @@ public final class Thumbs {
         if (m.bitmap == null) {
             m.bitmap = codecFrame(file);
             how = "codec";
+            DebugLog.add("  codec: " + (m.bitmap != null ? "OK" : "null"));
         }
 
         if (m.bitmap != null) {
             m.bitmap = scale(m.bitmap);
             if (stem != null) CACHE.put(stem, m.bitmap);
-            Log.i(TAG, "thumb ok via " + how + " for " + (stem != null ? stem : file.getName()));
+            DebugLog.add("  => thumb OK via " + how + " for " + id);
         } else {
-            Log.w(TAG, "thumb FAILED (all paths) for " + (stem != null ? stem : file.getName()));
+            DebugLog.add("  => thumb FAILED (all paths) for " + id);
         }
         return m;
     }
