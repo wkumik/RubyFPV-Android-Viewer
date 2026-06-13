@@ -1,5 +1,15 @@
 [versions]
 agp = "8.13.1"
+material = "1.12.0"
+constraintlayout = "2.1.4"
+swiperefresh = "1.1.0"
+jsch = "0.2.23"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+
+[libraries]
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+swiperefreshlayout = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swiperefresh" }
+jsch = { group = "com.github.mwiede", name = "jsch", version.ref = "jsch" }

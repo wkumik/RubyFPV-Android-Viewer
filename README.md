@@ -1,22 +1,41 @@
 # RubyFPV Android Viewer
 
-Android app that displays the live video feed from a [RubyFPV](https://rubyfpv.com) ground station over USB-C tethering.
+Android companion app for [RubyFPV](https://rubyfpv.com). Two modes:
 
-Plug your phone into the Ruby ground station, enable USB tethering, and see exactly what the pilot sees.
+1. **Recordings** (primary) — DJI-style transfer of onboard HEVC recordings off the
+   drone over its Wi-Fi, with on-device preview and sharing.
+2. **Live view** (secondary) — the live H.264 feed from a Ruby ground station over
+   USB-C tethering.
 
-## How it works
+## Recordings — download & preview
+
+When the drone is in **phone-transfer mode** (its radio comes up as a Wi-Fi AP), the
+app connects over SSH and lets you browse the onboard SD card:
+
+1. Join the drone's Wi-Fi and tap **Connect**
+2. Browse recorded clips with thumbnails, duration, size and date
+3. **Download** a clip — it transfers over Wi-Fi and is losslessly rewrapped from
+   `.ts` to `.mp4` on-device (zero re-encode) for reliable seeking and sharing
+4. **Play** it natively (hardware HEVC decode) or **Share** to anything
+
+Transfer uses an SSH `exec` + `cat` stream rather than SFTP, because the drone's
+dropbear build ships no SFTP/SCP subsystem.
+
+## Live view — how it works
 
 1. Phone connects to Ruby ground station via USB cable
 2. USB tethering is enabled on the phone (creates a network link)
 3. Ruby detects the phone and sends raw H.264 video over UDP port 5001
 4. The app decodes and displays the video in fullscreen with minimal latency
 
+(Open it from the **⋮ → Live view (USB)** menu on the Recordings screen.)
+
 ## Features
 
-- Hardware H.264 decoding via Android MediaCodec
-- Fullscreen landscape display
-- Auto-recovery on stream loss (3-second watchdog)
-- Stream stats overlay (tap screen to toggle): bitrate, packet rate, NAL rate
+- DJI-style recordings album: thumbnails, lossless `.ts`→`.mp4` remux, share sheet
+- Hardware H.264 / HEVC decoding via Android MediaCodec / MediaPlayer
+- Fullscreen landscape live display, auto-recovery on stream loss (3-second watchdog)
+- Live stream stats overlay (tap screen to toggle): bitrate, packet rate, NAL rate
 - Minimal latency — designed for FPV use
 
 ## Requirements

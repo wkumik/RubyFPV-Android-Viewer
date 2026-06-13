@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Remuxed .mp4 clips live in the app-private files dir -->
+    <files-path name="recordings" path="recordings/" />
+    <external-files-path name="ext_recordings" path="recordings/" />
+    <cache-path name="cache" path="." />
+</paths>

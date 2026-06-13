@@ -1,5 +1,21 @@
 # RubyFPV Android Viewer — Roadmap
 
+## Recordings — DJI-style transfer & preview (primary)
+
+Get onboard HEVC recordings off the drone over its Wi-Fi, review and share them.
+
+- [x] Material 3 dark "album" UI — thumbnails, duration, size, date
+- [x] SSH connection to the drone over dropbear (exec + `cat`, no SFTP subsystem)
+- [x] List `/mnt/mmcblk0p1/ruby/*.ts` (+ paired `.osd`)
+- [x] Download with progress
+- [x] Lossless `.ts` → `.mp4` remux on-device (MediaExtractor + MediaMuxer)
+- [x] Native HEVC playback (VideoView) with seeking
+- [x] First-frame thumbnails (MediaMetadataRetriever)
+- [x] Share sheet (`video/mp4` via FileProvider)
+- [x] Delete from drone / phone
+- [ ] In-app Wi-Fi join wired to drone AP (pending drone "phone-transfer mode")
+- [ ] End-to-end test against the AP, then package as a Ruby-update zip
+
 ## V1 — Basic Video Viewer (current)
 
 Core functionality: plug in phone via USB-C, see what the pilot sees.
