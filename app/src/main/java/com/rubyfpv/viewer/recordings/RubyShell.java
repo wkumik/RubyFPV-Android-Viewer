@@ -180,6 +180,30 @@ public class RubyShell {
         return total;
     }
 
+    /**
+     * Tell the drone to leave phone-transfer mode and reboot back into normal FPV.
+     *
+     * <p>On the drone, {@code /usr/bin/ap_mode.sh stop} simply <b>reboots</b> — that is the
+     * only reliable way out of the Realtek AP/monitor bounce (the script's own author made
+     * {@code stop} == {@code reboot}). The reboot tears down this very SSH link mid-command,
+     * so we background the command and do <b>not</b> wait for output or an exit status: a
+     * dropped connection right after issuing it is success, not failure. Callers should
+     * swallow any exception and treat it as "drone is rebooting".</p>
+     */
+    public void returnToFpv() throws Exception {
+        ChannelExec ch = (ChannelExec) session.openChannel("exec");
+        // Background it so dropbear hands control back before the box goes down.
+        ch.setCommand("/usr/bin/ap_mode.sh stop >/dev/null 2>&1 &");
+        ch.setInputStream(null);
+        try {
+            ch.connect();
+            // Give dropbear a moment to receive and start the command before the link drops.
+            try { Thread.sleep(400); } catch (InterruptedException ignored) {}
+        } finally {
+            disconnect(ch);
+        }
+    }
+
     /** Delete one or more files from the recordings dir. */
     public void delete(String... names) throws Exception {
         StringBuilder sb = new StringBuilder("rm -f");

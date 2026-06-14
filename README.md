@@ -1,93 +1,104 @@
 # RubyFPV Android Viewer
 
-Android companion app for [RubyFPV](https://rubyfpv.com). Two modes:
+Android companion app for [RubyFPV](https://rubyfpv.com). Browse, download, play and
+manage the onboard `.ts` recordings off your drone's SD card over Wi-Fi — DJI-Fly style —
+then tap **Return to FPV mode** to reboot the drone back to flight. A live USB viewer
+(the original `MainActivity`) is still available behind the ⋮ menu.
 
-1. **Recordings** (primary) — DJI-style transfer of onboard HEVC recordings off the
-   drone over its Wi-Fi, with on-device preview and sharing.
-2. **Live view** (secondary) — the live H.264 feed from a Ruby ground station over
-   USB-C tethering.
+## Phone-transfer workflow
 
-## Recordings — download & preview
+1. **On the Ruby Ground Station**, press **Enter phone-transfer mode**. The drone reboots
+   its radio into an open Wi-Fi access point named `RubyFPV-<MAC4>` at `192.168.4.1`.
+2. **On your phone**, join that Wi-Fi network.
+3. Open the app and tap **Connect**. It SSHes the drone and lists the onboard recordings.
+4. Browse clips with thumbnails, **download**, **play**, and **delete** as you like.
+5. When you're done, tap **⋮ → Return to FPV mode**. The drone reboots out of
+   phone-transfer AP mode back into normal flight/FPV (ready to fly again in ~45 s).
 
-When the drone is in **phone-transfer mode** (its radio comes up as a Wi-Fi AP), the
-app connects over SSH and lets you browse the onboard SD card:
+The drone runs **dropbear**, whose build ships **no SFTP / SCP subsystem**, so the app
+never opens an SFTP channel. It drives plain `exec` channels instead: listing with
+`stat`, transferring by streaming `cat`. Recordings live in `/mnt/mmcblk0p1/ruby` and the
+default login is `root@192.168.4.1:22` (editable in **⋮ → Connection settings**).
 
-1. Join the drone's Wi-Fi and tap **Connect**
-2. Browse recorded clips with thumbnails, duration, size and date
-3. **Download** a clip — it transfers over Wi-Fi and is losslessly rewrapped from
-   `.ts` to `.mp4` on-device (zero re-encode) for reliable seeking and sharing
-4. **Play** it natively (hardware HEVC decode) or **Share** to anything
+## Recordings — download & playback
 
-Transfer uses an SSH `exec` + `cat` stream rather than SFTP, because the drone's
-dropbear build ships no SFTP/SCP subsystem.
+- **Thumbnails** are decoded on-device from the first few MB of each clip (it starts on a
+  keyframe). The onboard recordings are **HEVC in MPEG-TS**, which the Android framework
+  demuxer reports as 0 tracks; the app uses media3 1.6.0's
+  `ExperimentalFrameExtractor` — the same ExoPlayer pipeline used for playback — to pull
+  the first frame.
+- **Playback** plays the downloaded `.ts` directly in ExoPlayer (no remux / re-encode).
+- **Multi-select**: long-press a clip to enter selection mode, then bulk-delete.
+- **Per-item delete** lets you choose where to remove a clip from: **phone**, **drone SD
+  card**, or **both**.
+- **Share** a downloaded clip to any app via the system share sheet.
 
-## Live view — how it works
+## Live USB viewer
 
-1. Phone connects to Ruby ground station via USB cable
-2. USB tethering is enabled on the phone (creates a network link)
-3. Ruby detects the phone and sends raw H.264 video over UDP port 5001
-4. The app decodes and displays the video in fullscreen with minimal latency
+The original USB viewer is still present, reachable from **⋮ → Live view (USB)**:
 
-(Open it from the **⋮ → Live view (USB)** menu on the Recordings screen.)
+1. Connect the phone to the Ruby ground station via USB cable and enable USB tethering.
+2. Ruby forwards raw H.264 video over UDP port 5001.
+3. The app decodes and displays it fullscreen with minimal latency.
+
+To enable forwarding on the ground station: **Controller > Video Forward**, turn on
+**Video Forward To USB Device**, type **Raw (H264)**, port **5001**.
 
 ## Features
 
-- DJI-style recordings album: thumbnails, lossless `.ts`→`.mp4` remux, share sheet
-- Hardware H.264 / HEVC decoding via Android MediaCodec / MediaPlayer
-- Fullscreen landscape live display, auto-recovery on stream loss (3-second watchdog)
-- Live stream stats overlay (tap screen to toggle): bitrate, packet rate, NAL rate
-- Minimal latency — designed for FPV use
+- Recordings browser with thumbnails, file size, date and on-drone / on-device state
+- ExoPlayer playback of `.ts` HEVC clips (hardware decode, no remux)
+- Multi-select (long-press) with bulk delete
+- Per-item delete: phone / drone SD card / both
+- Share downloaded clips via the system share sheet
+- **Return to FPV mode** — reboots the drone out of phone-transfer AP back into flight
+- Live USB viewer (raw H.264 over UDP 5001) behind the ⋮ menu
+- In-app diagnostics / debug log viewer
 
 ## Requirements
 
-- Android 7.0+ (API 24)
-- USB data cable (not charge-only)
-- RubyFPV ground station with USB video forwarding enabled
+- Android 7.0+ (min SDK 24, target SDK 35)
+- A RubyFPV drone that supports phone-transfer mode (open AP `RubyFPV-<MAC4>` @ 192.168.4.1)
+- For the live USB viewer: a USB data cable and a Ruby ground station with USB video
+  forwarding enabled
 
-## Ruby ground station setup
+## Build from source
 
-1. Go to **Controller > Video Forward** in the Ruby menu
-2. Enable **Video Forward To USB Device**
-3. Set type to **Raw (H264)**
-4. Port: **5001** (default)
+Requires **Java 21** and the Android SDK (`ANDROID_HOME` set, or a `local.properties`
+with `sdk.dir`).
 
-## Install
-
-Download the latest APK from [GitHub Actions](https://github.com/wkumik/RubyFPV-Android-Viewer/actions) (build artifacts) or build from source.
-
-### Build from source
-
-```
+```sh
 git clone https://github.com/wkumik/RubyFPV-Android-Viewer.git
 cd RubyFPV-Android-Viewer
-./gradlew assembleDebug
+./gradlew :app:assembleDebug
 ```
 
-APK will be at `app/build/outputs/apk/debug/app-debug.apk`
-
-## Testing without a ground station
-
-You can test the app using ffmpeg from a PC while the phone is USB-tethered to the PC:
+The APK is stamped with its version and lands at:
 
 ```
-ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 \
-  -pix_fmt yuv420p -c:v libx264 -profile:v baseline \
-  -tune zerolatency -g 30 -bsf:v dump_extra \
-  -f h264 udp://<phone_ip>:5001?pkt_size=1024
+app/build/outputs/apk/debug/RubyFPV-v<versionName>-b<versionCode>-debug.apk
 ```
 
-## Roadmap
+(e.g. `RubyFPV-v1.6-b8-debug.apk`).
 
-See [ROADMAP.md](ROADMAP.md) for planned features including:
-- Ruby OSD overlay (V2)
-- H.265 support (V3)
-- Screen recording / DVR (V4)
+Install it with adb:
+
+```sh
+adb install -r app/build/outputs/apk/debug/RubyFPV-v1.6-b8-debug.apk
+```
+
+## Tech notes
+
+- media3 1.6.0 (ExoPlayer + UI + Transformer's `ExperimentalFrameExtractor`)
+- jsch (`com.github.mwiede:jsch`) for SSH over the drone's dropbear (exec channels only —
+  no SFTP)
+- Min SDK 24, target / compile SDK 35, Java 17 source/target
 
 ## Credits
 
 - [RubyFPV](https://rubyfpv.com) by Petru Soroaga
-- Video decoding architecture inspired by [OpenIPC Decoder](https://github.com/OpenIPC/decoder) (MIT License)
-- NAL parsing based on [Consti10/myMediaCodecPlayer-for-FPV](https://github.com/Consti10/myMediaCodecPlayer-for-FPV)
+- Live USB viewer NAL parsing based on
+  [Consti10/myMediaCodecPlayer-for-FPV](https://github.com/Consti10/myMediaCodecPlayer-for-FPV)
 
 ## License
 

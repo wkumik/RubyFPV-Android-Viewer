@@ -40,6 +40,19 @@
             app:layout_constraintStart_toStartOf="@id/thumb"
             app:layout_constraintEnd_toEndOf="@id/thumb" />
 
+        <ImageView
+            android:id="@+id/select_check"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_margin="6dp"
+            android:padding="3dp"
+            android:background="@drawable/play_scrim"
+            android:src="@drawable/ic_check_circle"
+            android:visibility="gone"
+            app:tint="@android:color/white"
+            app:layout_constraintTop_toTopOf="@id/thumb"
+            app:layout_constraintStart_toStartOf="@id/thumb" />
+
         <TextView
             android:id="@+id/badge_duration"
             android:layout_width="wrap_content"

@@ -10,8 +10,8 @@ android {
         applicationId "com.rubyfpv.viewer"
         minSdk 24
         targetSdk 35
-        versionCode 5
-        versionName "1.4"
+        versionCode 8
+        versionName "1.6"
     }
 
     buildFeatures {
@@ -46,4 +46,5 @@ dependencies {
     implementation libs.jsch
     implementation libs.media3.exoplayer
     implementation libs.media3.ui
+    implementation libs.media3.transformer
 }

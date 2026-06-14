@@ -10,11 +10,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -144,6 +147,19 @@ public class RecordingsActivity extends AppCompatActivity
             ui.post(() -> adapter.notifyDataSetChanged());
         });
 
+        // Back exits multi-select before leaving the screen.
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (adapter.isSelectionMode()) {
+                    adapter.exitSelection();
+                } else {
+                    setEnabled(false);
+                    getOnBackPressedDispatcher().onBackPressed();
+                }
+            }
+        });
+
         loadLocal();
         setStatus(StatusKind.OFFLINE, getString(R.string.status_disconnected));
     }
@@ -196,11 +212,17 @@ public class RecordingsActivity extends AppCompatActivity
         } else if (id == R.id.menu_live) {
             startActivity(new Intent(this, MainActivity.class));
             return true;
+        } else if (id == R.id.menu_return_fpv) {
+            confirmReturnToFpv();
+            return true;
         } else if (id == R.id.menu_connection) {
             showConnectionDialog();
             return true;
         } else if (id == R.id.menu_diagnostics) {
             showDiagnosticsDialog();
+            return true;
+        } else if (id == R.id.menu_delete) {
+            bulkDelete(adapter.selectedItems());
             return true;
         }
         return false;
@@ -239,6 +261,44 @@ public class RecordingsActivity extends AppCompatActivity
                 })
                 .setPositiveButton("Close", null)
                 .show();
+    }
+
+    // ── Return to FPV ───────────────────────────────────────────────────
+
+    /**
+     * Reboot the drone out of phone-transfer mode, back into normal FPV. Distinct from
+     * {@link #disconnect()} (which only drops our SSH session): leaving AP mode requires a
+     * drone reboot — {@code ap_mode.sh stop} == {@code reboot} — so this is a deliberate,
+     * confirmed action. The AP (and our link) drop as the drone goes down; that's expected.
+     */
+    private void confirmReturnToFpv() {
+        if (!connected || shell == null) {
+            Toast.makeText(this, R.string.return_fpv_need_connection, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.return_fpv_title)
+                .setMessage(R.string.return_fpv_message)
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.return_fpv_confirm, (d, w) -> doReturnToFpv())
+                .show();
+    }
+
+    private void doReturnToFpv() {
+        final RubyShell s = shell;
+        if (s == null) return;
+        setStatus(StatusKind.BUSY, getString(R.string.status_return_fpv));
+        io.execute(() -> {
+            try {
+                s.returnToFpv();
+            } catch (Exception ignored) {
+                // The reboot drops the link mid-command — that's success, not an error.
+            }
+            ui.post(() -> {
+                Toast.makeText(this, R.string.status_return_fpv, Toast.LENGTH_LONG).show();
+                disconnect();   // tear down our side; the drone is rebooting into FPV
+            });
+        });
     }
 
     // ── Connection ──────────────────────────────────────────────────────
@@ -357,7 +417,7 @@ public class RecordingsActivity extends AppCompatActivity
             try {
                 if (shell == null || Thumbs.CACHE.get(r.stem) != null) return;
                 shell.downloadPrefix(r.tsName, 4 * 1024 * 1024, part);
-                Thumbs.Meta m = Thumbs.extract(part, r.stem);   // bitmap only; duration is partial
+                Thumbs.Meta m = Thumbs.extract(getApplicationContext(), part, r.stem);   // bitmap only
                 if (m.bitmap != null) {
                     Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
                     ui.post(() -> adapter.update(r));
@@ -382,11 +442,21 @@ public class RecordingsActivity extends AppCompatActivity
             boolean mp4 = name.endsWith(".mp4");
             boolean ts = name.endsWith(".ts");
             if (!mp4 && !ts) continue;
+            // Purge stray 0-byte .mp4s left by older builds' failed remux attempts
+            // (the framework muxer creates the output before discovering it can't
+            // demux HEVC-TS). A 0-byte file would otherwise become the "playable"
+            // file and ExoPlayer would report container-unsupported.
+            if (f.length() == 0) {
+                //noinspection ResultOfMethodCallIgnored
+                if (mp4) f.delete();
+                continue;
+            }
             String stem = name.substring(0, name.lastIndexOf('.'));
             Recording r = byStem.get(stem);
             if (r == null) { r = new Recording(stem); byStem.put(stem, r); }
-            // prefer mp4 as the playable file
-            if (mp4 || r.localFile == null) r.localFile = f;
+            // Prefer the .ts: ExoPlayer plays HEVC-in-TS directly. Only fall back
+            // to a (non-empty) .mp4 if no .ts is present.
+            if (ts || r.localFile == null) r.localFile = f;
             r.state = Recording.State.READY;
             r.mtimeEpoch = f.lastModified() / 1000L;
         }
@@ -401,7 +471,7 @@ public class RecordingsActivity extends AppCompatActivity
         if (Thumbs.CACHE.get(r.stem) != null && r.durationMs > 0) return;
         final File f = r.localFile;
         work.execute(() -> {
-            Thumbs.Meta m = Thumbs.extract(f, r.stem);
+            Thumbs.Meta m = Thumbs.extract(getApplicationContext(), f, r.stem);
             if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
             ui.post(() -> {
                 if (m.durationMs > 0) r.durationMs = m.durationMs;
@@ -441,7 +511,7 @@ public class RecordingsActivity extends AppCompatActivity
                     } catch (Exception ignore) { /* OSD sidecar is optional */ }
                 }
                 ui.post(() -> { r.state = Recording.State.REMUXING; adapter.update(r); });
-                remux(r, ts);
+                finishDownload(r, ts);
             } catch (Exception e) {
                 //noinspection ResultOfMethodCallIgnored
                 ts.delete();
@@ -455,23 +525,18 @@ public class RecordingsActivity extends AppCompatActivity
         });
     }
 
-    private void remux(Recording r, File ts) {
+    /**
+     * Finalise a freshly-downloaded clip. The {@code .ts} is the playable file:
+     * ExoPlayer demuxes HEVC-in-TS directly, so there is no remux step (the
+     * framework muxer can't demux HEVC-TS and would only leave a 0-byte .mp4).
+     */
+    private void finishDownload(Recording r, File ts) {
         work.execute(() -> {
-            File mp4 = new File(dir, r.stem + ".mp4");
-            boolean ok = Remuxer.remux(ts, mp4);
-            File playable;
-            if (ok) {
-                //noinspection ResultOfMethodCallIgnored
-                ts.delete();
-                playable = mp4;
-            } else {
-                playable = ts; // fall back to playing the .ts directly
-            }
-            Thumbs.Meta m = Thumbs.extract(playable, r.stem);
+            Thumbs.Meta m = Thumbs.extract(getApplicationContext(), ts, r.stem);
             if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
             ui.post(() -> {
-                r.localFile = playable;
-                r.durationMs = m.durationMs;
+                r.localFile = ts;
+                if (m.durationMs > 0) r.durationMs = m.durationMs;
                 r.state = Recording.State.READY;
                 adapter.update(r);
             });
@@ -494,7 +559,7 @@ public class RecordingsActivity extends AppCompatActivity
             android.net.Uri uri = FileProvider.getUriForFile(
                     this, getPackageName() + ".fileprovider", r.localFile);
             Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType("video/mp4");
+            send.setType(mimeFor(r.localFile));
             send.putExtra(Intent.EXTRA_STREAM, uri);
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(Intent.createChooser(send, getString(R.string.share_title)));
@@ -505,32 +570,144 @@ public class RecordingsActivity extends AppCompatActivity
 
     @Override
     public void onDelete(Recording r) {
-        boolean drone = r.onDrone && connected;
-        String msg = drone
-                ? getString(R.string.delete_drone_body, r.stem)
-                : "Remove the downloaded copy of \"" + r.stem + "\"?";
+        boolean onPhone = r.isLocal();
+        boolean onDrone = r.onDrone && connected;
+        if (onPhone && onDrone) {
+            // Let the user pick which copy/copies to remove.
+            CharSequence[] opts = {
+                    getString(R.string.delete_phone_only),
+                    getString(R.string.delete_sd_only),
+                    getString(R.string.delete_both),
+            };
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.delete_title)
+                    .setItems(opts, (d, which) ->
+                            confirmDelete(r, which == 0 || which == 2, which == 1 || which == 2))
+                    .setNegativeButton(R.string.cancel, null)
+                    .show();
+        } else {
+            confirmDelete(r, onPhone, onDrone);
+        }
+    }
+
+    private void confirmDelete(Recording r, boolean phone, boolean drone) {
+        if (!phone && !drone) return;
+        String msg;
+        if (phone && drone) msg = getString(R.string.delete_both_body, r.stem);
+        else if (drone)     msg = getString(R.string.delete_drone_body, r.stem);
+        else                msg = getString(R.string.delete_phone_body, r.stem);
         new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.delete_title)
                 .setMessage(msg)
                 .setNegativeButton(R.string.cancel, null)
-                .setPositiveButton(R.string.delete_confirm, (d, w) -> doDelete(r, drone))
+                .setPositiveButton(R.string.delete_confirm, (d, w) -> {
+                    removeRecording(r, phone, drone);
+                    refreshUi();
+                })
                 .show();
     }
 
-    private void doDelete(Recording r, boolean drone) {
-        // local files first
-        deleteLocal(r);
-        if (drone && shell != null) {
-            io.execute(() -> {
-                try { shell.delete(r.tsName, r.osdName); } catch (Exception ignored) {}
-            });
+    // ── Multi-select ────────────────────────────────────────────────────
+
+    @Override
+    public void onSelectionChanged(int count) {
+        if (count > 0) {
+            toolbar.setNavigationIcon(R.drawable.ic_arrow_back);
+            toolbar.setNavigationOnClickListener(v -> adapter.exitSelection());
+            toolbar.setTitle(getString(R.string.selected_count, count));
+            toolbar.setSubtitle(null);
+        } else {
+            toolbar.setNavigationIcon(null);
+            toolbar.setNavigationOnClickListener(null);
+            toolbar.setTitle(R.string.recordings_title);
+            toolbar.setSubtitle("v" + com.rubyfpv.viewer.BuildConfig.VERSION_NAME
+                    + " (" + com.rubyfpv.viewer.BuildConfig.VERSION_CODE + ")");
         }
-        Thumbs.CACHE.remove(r.stem);
-        File thumb = new File(thumbsDir, r.stem + ".jpg");
-        if (thumb.exists()) //noinspection ResultOfMethodCallIgnored
-            thumb.delete();
-        byStem.remove(r.stem);
-        refreshUi();
+        Menu m = toolbar.getMenu();
+        if (m != null) {
+            boolean selecting = count > 0;
+            int[] normal = { R.id.menu_layout, R.id.menu_refresh, R.id.menu_live,
+                    R.id.menu_connection, R.id.menu_diagnostics };
+            for (int id : normal) {
+                MenuItem it = m.findItem(id);
+                if (it != null) it.setVisible(!selecting);
+            }
+            MenuItem del = m.findItem(R.id.menu_delete);
+            if (del != null) del.setVisible(selecting);
+        }
+    }
+
+    private void bulkDelete(java.util.List<Recording> sel) {
+        if (sel == null || sel.isEmpty()) return;
+        boolean anyPhone = false, anyDrone = false;
+        for (Recording r : sel) {
+            if (r.isLocal()) anyPhone = true;
+            if (r.onDrone && connected) anyDrone = true;
+        }
+        if (!anyPhone && !anyDrone) return;
+        if (anyPhone && anyDrone) {
+            CharSequence[] opts = {
+                    getString(R.string.delete_phone_only),
+                    getString(R.string.delete_sd_only),
+                    getString(R.string.delete_both),
+            };
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle(getString(R.string.delete_selected_title, sel.size()))
+                    .setItems(opts, (d, which) ->
+                            confirmBulk(sel, which == 0 || which == 2, which == 1 || which == 2))
+                    .setNegativeButton(R.string.cancel, null)
+                    .show();
+        } else {
+            confirmBulk(sel, anyPhone, anyDrone);
+        }
+    }
+
+    private void confirmBulk(java.util.List<Recording> sel, boolean phone, boolean drone) {
+        String where = (phone && drone) ? getString(R.string.delete_where_both)
+                : drone ? getString(R.string.delete_where_sd)
+                : getString(R.string.delete_where_phone);
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(getString(R.string.delete_selected_title, sel.size()))
+                .setMessage(getString(R.string.delete_selected_body, sel.size(), where))
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.delete_confirm, (d, w) -> {
+                    for (Recording r : new ArrayList<>(sel)) {
+                        removeRecording(r, phone && r.isLocal(),
+                                drone && r.onDrone && connected);
+                    }
+                    adapter.exitSelection();
+                    refreshUi();
+                })
+                .show();
+    }
+
+    /** Remove one clip from the chosen location(s); does not touch the UI. */
+    private void removeRecording(Recording r, boolean phone, boolean drone) {
+        if (phone) {
+            deleteLocal(r);
+            Thumbs.CACHE.remove(r.stem);
+            File thumb = new File(thumbsDir, r.stem + ".jpg");
+            if (thumb.exists()) //noinspection ResultOfMethodCallIgnored
+                thumb.delete();
+        }
+        if (drone && shell != null) {
+            final String ts = r.tsName, osd = r.osdName;
+            io.execute(() -> {
+                try { shell.delete(ts, osd); } catch (Exception ignored) {}
+            });
+            r.onDrone = false;
+        }
+        if (!r.isLocal() && !r.onDrone) {
+            byStem.remove(r.stem);
+        } else if (r.isLocal()) {
+            r.state = Recording.State.READY;
+        } else {
+            r.state = Recording.State.ON_DRONE;
+        }
+    }
+
+    private static String mimeFor(File f) {
+        return f != null && f.getName().endsWith(".ts") ? "video/mp2t" : "video/mp4";
     }
 
     private void deleteLocal(Recording r) {

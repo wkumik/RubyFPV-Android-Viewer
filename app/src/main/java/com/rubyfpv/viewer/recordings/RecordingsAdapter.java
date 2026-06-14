@@ -5,18 +5,21 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
-import android.widget.PopupMenu;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.rubyfpv.viewer.R;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH> {
 
@@ -28,11 +31,14 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
         void onPlay(Recording r);
         void onShare(Recording r);
         void onDelete(Recording r);
+        void onSelectionChanged(int count);  // 0 = selection mode off
     }
 
     private final List<Recording> items = new ArrayList<>();
+    private final Set<String> selected = new HashSet<>();
     private final Listener listener;
     private boolean compact;
+    private boolean selectionMode;
 
     public RecordingsAdapter(Listener listener) {
         this.listener = listener;
@@ -42,6 +48,15 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
     public void submit(List<Recording> next) {
         items.clear();
         items.addAll(next);
+        // Drop selected stems that no longer exist (e.g. just deleted).
+        if (!selected.isEmpty()) {
+            Set<String> present = new HashSet<>();
+            for (Recording r : items) present.add(r.stem);
+            if (selected.retainAll(present) && selected.isEmpty()) {
+                selectionMode = false;
+                listener.onSelectionChanged(0);
+            }
+        }
         notifyDataSetChanged();
     }
 
@@ -59,6 +74,40 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
 
     public boolean isCompact() {
         return compact;
+    }
+
+    // ── Multi-select ────────────────────────────────────────────────────
+
+    public boolean isSelectionMode() {
+        return selectionMode;
+    }
+
+    public List<Recording> selectedItems() {
+        List<Recording> out = new ArrayList<>();
+        for (Recording r : items) if (selected.contains(r.stem)) out.add(r);
+        return out;
+    }
+
+    public void exitSelection() {
+        if (!selectionMode && selected.isEmpty()) return;
+        selectionMode = false;
+        selected.clear();
+        notifyDataSetChanged();
+        listener.onSelectionChanged(0);
+    }
+
+    private void enterSelection(Recording r) {
+        selectionMode = true;
+        selected.add(r.stem);
+        notifyDataSetChanged();
+        listener.onSelectionChanged(selected.size());
+    }
+
+    private void toggle(Recording r) {
+        if (!selected.remove(r.stem)) selected.add(r.stem);
+        if (selected.isEmpty()) selectionMode = false;
+        notifyDataSetChanged();
+        listener.onSelectionChanged(selected.size());
     }
 
     @Override
@@ -96,8 +145,18 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
             h.badge.setVisibility(View.GONE);
         }
 
+        // Selection visuals.
+        boolean isSelected = selected.contains(r.stem);
+        h.selectCheck.setVisibility(isSelected ? View.VISIBLE : View.GONE);
+        if (h.card != null) {
+            float density = h.itemView.getResources().getDisplayMetrics().density;
+            h.card.setStrokeWidth(Math.round((isSelected ? 2f : 1f) * density));
+            h.card.setStrokeColor(ContextCompat.getColor(h.card.getContext(),
+                    isSelected ? R.color.ruby : R.color.outline));
+        }
+
         boolean ready = r.state == Recording.State.READY;
-        h.playOverlay.setVisibility(ready ? View.VISIBLE : View.GONE);
+        h.playOverlay.setVisibility(ready && !selectionMode ? View.VISIBLE : View.GONE);
 
         long shownSize = r.remoteSize > 0 ? r.remoteSize
                 : (r.localFile != null ? r.localFile.length() : 0);
@@ -127,8 +186,11 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
                 break;
         }
 
-        // Primary button only exists in the large layout.
-        if (h.primary != null) {
+        // Action row (large layout only) is hidden while selecting.
+        if (h.actions != null) {
+            h.actions.setVisibility(selectionMode ? View.GONE : View.VISIBLE);
+        }
+        if (h.primary != null && !selectionMode) {
             boolean busy = r.state == Recording.State.DOWNLOADING
                     || r.state == Recording.State.REMUXING;
             h.primary.setVisibility(busy ? View.GONE : View.VISIBLE);
@@ -150,35 +212,24 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
         }
 
         View.OnClickListener tap = v -> {
+            if (selectionMode) { toggle(r); return; }
             if (r.state == Recording.State.READY) listener.onPlay(r);
             else if (r.state == Recording.State.ON_DRONE
                     || r.state == Recording.State.FAILED) listener.onPrimary(r);
         };
+        // Long-press must be wired on every clickable child too: a child with an
+        // OnClickListener is `clickable` and swallows the touch, so the card's
+        // own long-press detector never fires when you hold the thumbnail.
+        View.OnLongClickListener hold = v -> {
+            if (selectionMode) toggle(r); else enterSelection(r);
+            return true;
+        };
         h.playOverlay.setOnClickListener(tap);
         h.thumb.setOnClickListener(tap);
-        // In compact mode the whole card acts; long-press always offers the full menu.
-        if (h.primary == null) h.itemView.setOnClickListener(tap);
-        h.itemView.setOnLongClickListener(v -> { showContextMenu(v, r); return true; });
-    }
-
-    private void showContextMenu(View anchor, Recording r) {
-        boolean ready = r.state == Recording.State.READY;
-        PopupMenu pm = new PopupMenu(anchor.getContext(), anchor);
-        pm.getMenuInflater().inflate(R.menu.item_context, pm.getMenu());
-        pm.getMenu().findItem(R.id.ctx_play).setVisible(ready);
-        pm.getMenu().findItem(R.id.ctx_download).setVisible(!ready && r.onDrone);
-        pm.getMenu().findItem(R.id.ctx_share).setVisible(ready);
-        pm.getMenu().findItem(R.id.ctx_delete).setVisible(r.onDrone || r.isLocal());
-        pm.setOnMenuItemClickListener(item -> {
-            int id = item.getItemId();
-            if (id == R.id.ctx_play) listener.onPlay(r);
-            else if (id == R.id.ctx_download) listener.onPrimary(r);
-            else if (id == R.id.ctx_share) listener.onShare(r);
-            else if (id == R.id.ctx_delete) listener.onDelete(r);
-            else return false;
-            return true;
-        });
-        pm.show();
+        h.itemView.setOnClickListener(tap);
+        h.playOverlay.setOnLongClickListener(hold);
+        h.thumb.setOnLongClickListener(hold);
+        h.itemView.setOnLongClickListener(hold);
     }
 
     private static String join(String a, String b) {
@@ -192,19 +243,24 @@ public class RecordingsAdapter extends RecyclerView.Adapter<RecordingsAdapter.VH
     }
 
     static class VH extends RecyclerView.ViewHolder {
-        final ImageView thumb, playOverlay;
+        final ImageView thumb, playOverlay, selectCheck;
         final TextView badge, title, meta;
         final LinearProgressIndicator progress;
-        final MaterialButton primary, share, delete;  // null in compact layout
+        final MaterialCardView card;
+        final View actions;                            // null in compact layout
+        final MaterialButton primary, share, delete;   // null in compact layout
 
         VH(@NonNull View v) {
             super(v);
             thumb = v.findViewById(R.id.thumb);
             playOverlay = v.findViewById(R.id.play_overlay);
+            selectCheck = v.findViewById(R.id.select_check);
             badge = v.findViewById(R.id.badge_duration);
             title = v.findViewById(R.id.title);
             meta = v.findViewById(R.id.meta);
             progress = v.findViewById(R.id.progress);
+            card = (v instanceof MaterialCardView) ? (MaterialCardView) v : null;
+            actions = v.findViewById(R.id.actions);
             primary = v.findViewById(R.id.btn_primary);
             share = v.findViewById(R.id.btn_share);
             delete = v.findViewById(R.id.btn_delete);

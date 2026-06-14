@@ -1,41 +1,37 @@
 package com.rubyfpv.viewer.recordings;
 
+import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.ImageFormat;
-import android.graphics.Rect;
-import android.graphics.YuvImage;
-import android.media.Image;
-import android.media.MediaCodec;
-import android.media.MediaCodecInfo;
-import android.media.MediaExtractor;
-import android.media.MediaFormat;
-import android.media.MediaMetadataRetriever;
-import android.util.Log;
+import android.net.Uri;
 import android.util.LruCache;
 
-import java.io.ByteArrayOutputStream;
+import androidx.media3.common.Effect;
+import androidx.media3.common.MediaItem;
+import androidx.media3.transformer.ExperimentalFrameExtractor;
+
+import com.google.common.util.concurrent.ListenableFuture;
+
 import java.io.File;
 import java.io.FileOutputStream;
-import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.concurrent.TimeUnit;
 
 /**
- * First-frame thumbnails (DJI-style) + duration.
+ * First-frame thumbnails (DJI-style).
  *
- * <p>Android's {@link MediaMetadataRetriever} can't decode MPEG-TS (returns null),
- * and the preload path feeds a partial {@code .ts} prefix. So {@link #extract}
- * tries, in order of reliability:</p>
- * <ol>
- *   <li>MMR directly — works for {@code .mp4};</li>
- *   <li>remux the input to a tiny {@code .mp4} (same {@link Remuxer} that builds the
- *       playable clips) then MMR — the workhorse for {@code .ts};</li>
- *   <li>a {@link MediaCodec} first-frame decode as a last resort.</li>
- * </ol>
+ * <p>The clips are HEVC in an MPEG-TS container. Android's framework demuxer
+ * ({@link android.media.MediaExtractor} / {@link android.media.MediaMetadataRetriever})
+ * <b>cannot</b> demux HEVC-in-TS — it opens the file but reports zero tracks — so
+ * every framework path (MMR, remux-to-MP4, MediaCodec) fails. media3's
+ * {@link ExperimentalFrameExtractor} runs the same ExoPlayer pipeline that plays
+ * the clips, whose {@code TsExtractor} <i>does</i> support HEVC, so it decodes the
+ * first frame directly from the {@code .ts} (or a downloaded {@code .ts} prefix).</p>
  */
 public final class Thumbs {
 
-    private static final String TAG = "Thumbs";
     private static final int MAX_W = 640;
+    private static final long FRAME_TIMEOUT_S = 20;
 
     public static final LruCache<String, Bitmap> CACHE;
 
@@ -53,79 +49,46 @@ public final class Thumbs {
 
     public static class Meta {
         public Bitmap bitmap;
-        public long durationMs = -1;
+        public long durationMs = -1;   // best-effort; raw TS carries no duration header
     }
 
-    public static Meta extract(File file, String stem) {
+    public static Meta extract(Context ctx, File file, String stem) {
         Meta m = new Meta();
         String id = stem != null ? stem : file.getName();
         DebugLog.add("extract " + id + " (" + file.length() + " B)");
 
-        // 1) MMR directly (works for .mp4)
-        m.bitmap = mmrFrame(file);
-        m.durationMs = mmrDuration(file);
-        String how = "mmr";
-        DebugLog.add("  mmr-direct: " + (m.bitmap != null ? "OK" : "null"));
-
-        // 2) remux to a small .mp4 then MMR (the .ts / prefix path)
-        if (m.bitmap == null) {
-            File tmp = new File(file.getAbsolutePath() + ".thumb.mp4");
-            try {
-                boolean rx = Remuxer.remux(file, tmp);
-                DebugLog.add("  remux: " + (rx ? ("OK " + tmp.length() + " B") : "FAIL"));
-                if (rx) {
-                    m.bitmap = mmrFrame(tmp);
-                    if (m.durationMs <= 0) m.durationMs = mmrDuration(tmp);
-                    how = "remux+mmr";
-                    DebugLog.add("  mmr-on-remux: " + (m.bitmap != null ? "OK" : "null"));
-                }
-            } finally {
-                //noinspection ResultOfMethodCallIgnored
-                tmp.delete();
-            }
-        }
-
-        // 3) MediaCodec first-frame decode
-        if (m.bitmap == null) {
-            m.bitmap = codecFrame(file);
-            how = "codec";
-            DebugLog.add("  codec: " + (m.bitmap != null ? "OK" : "null"));
-        }
+        m.bitmap = frame(ctx, file);
+        DebugLog.add("  media3-frame: " + (m.bitmap != null ? "OK" : "null"));
 
         if (m.bitmap != null) {
             m.bitmap = scale(m.bitmap);
             if (stem != null) CACHE.put(stem, m.bitmap);
-            DebugLog.add("  => thumb OK via " + how + " for " + id);
+            DebugLog.add("  => thumb OK for " + id);
         } else {
-            DebugLog.add("  => thumb FAILED (all paths) for " + id);
+            DebugLog.add("  => thumb FAILED for " + id);
         }
         return m;
     }
 
-    // ── MediaMetadataRetriever ──────────────────────────────────────────
-
-    private static Bitmap mmrFrame(File file) {
-        MediaMetadataRetriever r = new MediaMetadataRetriever();
+    /**
+     * Decode the first frame via media3's ExoPlayer pipeline. Safe to call from a
+     * plain background thread (the extractor runs its own internal playback looper);
+     * blocks until the frame is ready or {@link #FRAME_TIMEOUT_S} elapses.
+     */
+    private static Bitmap frame(Context ctx, File file) {
+        ExperimentalFrameExtractor fe = new ExperimentalFrameExtractor(
+                ctx.getApplicationContext(),
+                new ExperimentalFrameExtractor.Configuration.Builder().build());
         try {
-            r.setDataSource(file.getAbsolutePath());
-            return r.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            fe.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)),
+                    Collections.<Effect>emptyList());
+            ListenableFuture<ExperimentalFrameExtractor.Frame> future = fe.getFrame(0);
+            ExperimentalFrameExtractor.Frame f = future.get(FRAME_TIMEOUT_S, TimeUnit.SECONDS);
+            return f != null ? f.bitmap : null;
         } catch (Exception e) {
             return null;
         } finally {
-            try { r.release(); } catch (Exception ignored) {}
-        }
-    }
-
-    private static long mmrDuration(File file) {
-        MediaMetadataRetriever r = new MediaMetadataRetriever();
-        try {
-            r.setDataSource(file.getAbsolutePath());
-            String d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-            return d == null ? -1 : Long.parseLong(d);
-        } catch (Exception e) {
-            return -1;
-        } finally {
-            try { r.release(); } catch (Exception ignored) {}
+            try { fe.release(); } catch (Exception ignored) {}
         }
     }
 
@@ -155,113 +118,7 @@ public final class Thumbs {
         }
     }
 
-    // ── MediaCodec first-frame decode (fallback) ────────────────────────
-
-    private static Bitmap codecFrame(File file) {
-        MediaExtractor ex = new MediaExtractor();
-        MediaCodec codec = null;
-        try {
-            ex.setDataSource(file.getAbsolutePath());
-            int track = -1;
-            MediaFormat fmt = null;
-            for (int i = 0; i < ex.getTrackCount(); i++) {
-                MediaFormat f = ex.getTrackFormat(i);
-                String mime = f.getString(MediaFormat.KEY_MIME);
-                if (mime != null && mime.startsWith("video/")) { track = i; fmt = f; break; }
-            }
-            if (track < 0) return null;
-            ex.selectTrack(track);
-
-            String mime = fmt.getString(MediaFormat.KEY_MIME);
-            fmt.setInteger(MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
-            codec = MediaCodec.createDecoderByType(mime);
-            codec.configure(fmt, null, null, 0);
-            codec.start();
-
-            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            boolean inputDone = false;
-            int guard = 0;
-            while (guard++ < 3000) {
-                if (!inputDone) {
-                    int inIdx = codec.dequeueInputBuffer(10000);
-                    if (inIdx >= 0) {
-                        ByteBuffer ib = codec.getInputBuffer(inIdx);
-                        int size = ib == null ? -1 : ex.readSampleData(ib, 0);
-                        if (size < 0) {
-                            codec.queueInputBuffer(inIdx, 0, 0, 0,
-                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            inputDone = true;
-                        } else {
-                            codec.queueInputBuffer(inIdx, 0, size, ex.getSampleTime(), 0);
-                            ex.advance();
-                        }
-                    }
-                }
-                int outIdx = codec.dequeueOutputBuffer(info, 10000);
-                if (outIdx >= 0) {
-                    Bitmap bmp = null;
-                    if (info.size > 0) {
-                        Image img = codec.getOutputImage(outIdx);
-                        if (img != null) { bmp = imageToBitmap(img); img.close(); }
-                    }
-                    codec.releaseOutputBuffer(outIdx, false);
-                    if (bmp != null) return bmp;
-                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) return null;
-                }
-            }
-            return null;
-        } catch (Exception e) {
-            return null;
-        } finally {
-            if (codec != null) {
-                try { codec.stop(); } catch (Exception ignored) {}
-                try { codec.release(); } catch (Exception ignored) {}
-            }
-            try { ex.release(); } catch (Exception ignored) {}
-        }
-    }
-
-    private static Bitmap imageToBitmap(Image image) {
-        int w = image.getWidth();
-        int h = image.getHeight();
-        byte[] nv21 = yuv420ToNv21(image, w, h);
-        YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, w, h, null);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        yuv.compressToJpeg(new Rect(0, 0, w, h), 90, out);
-        byte[] jpeg = out.toByteArray();
-        return BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
-    }
-
-    private static byte[] yuv420ToNv21(Image image, int width, int height) {
-        Image.Plane[] planes = image.getPlanes();
-        byte[] nv21 = new byte[width * height * 3 / 2];
-
-        ByteBuffer yBuf = planes[0].getBuffer();
-        int yRowStride = planes[0].getRowStride();
-        int pos = 0;
-        for (int row = 0; row < height; row++) {
-            yBuf.position(row * yRowStride);
-            yBuf.get(nv21, pos, width);
-            pos += width;
-        }
-
-        ByteBuffer uBuf = planes[1].getBuffer();
-        ByteBuffer vBuf = planes[2].getBuffer();
-        int uRowStride = planes[1].getRowStride();
-        int uPixStride = planes[1].getPixelStride();
-        int vRowStride = planes[2].getRowStride();
-        int vPixStride = planes[2].getPixelStride();
-        int cw = width / 2;
-        int ch = height / 2;
-        for (int row = 0; row < ch; row++) {
-            for (int col = 0; col < cw; col++) {
-                nv21[pos++] = vBuf.get(row * vRowStride + col * vPixStride);
-                nv21[pos++] = uBuf.get(row * uRowStride + col * uPixStride);
-            }
-        }
-        return nv21;
-    }
+    // ── Scaling ─────────────────────────────────────────────────────────
 
     private static Bitmap scale(Bitmap src) {
         int w = src.getWidth();
