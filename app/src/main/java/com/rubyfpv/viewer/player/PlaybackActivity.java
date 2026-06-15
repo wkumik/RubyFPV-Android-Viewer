@@ -30,24 +30,34 @@ import java.io.File;
 public class PlaybackActivity extends AppCompatActivity {
 
     public static final String EXTRA_PATH = "path";
+    public static final String EXTRA_URI = "uri";
     public static final String EXTRA_TITLE = "title";
 
     private ExoPlayer player;
     private PlayerView playerView;
-    private File file;
+    private File file;          // set when playing an app-local file (fallback)
+    private Uri mediaUri;       // set when playing a content:// gallery item
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_playback);
 
+        String uriStr = getIntent().getStringExtra(EXTRA_URI);
         String path = getIntent().getStringExtra(EXTRA_PATH);
         String title = getIntent().getStringExtra(EXTRA_TITLE);
-        if (path == null) { finish(); return; }
-        file = new File(path);
+        if (uriStr != null) {
+            mediaUri = Uri.parse(uriStr);
+        } else if (path != null) {
+            file = new File(path);
+            mediaUri = Uri.fromFile(file);
+        } else {
+            finish();
+            return;
+        }
 
         MaterialToolbar toolbar = findViewById(R.id.player_toolbar);
-        toolbar.setTitle(title != null ? title : file.getName());
+        toolbar.setTitle(title != null ? title : (file != null ? file.getName() : "Recording"));
         toolbar.setNavigationOnClickListener(v -> finish());
         toolbar.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == R.id.menu_share) { share(); return true; }
@@ -72,7 +82,7 @@ public class PlaybackActivity extends AppCompatActivity {
                         "Playback error: " + error.getErrorCodeName(), Toast.LENGTH_LONG).show();
             }
         });
-        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)));
+        player.setMediaItem(MediaItem.fromUri(mediaUri));
         player.prepare();
         player.setPlayWhenReady(true);
     }
@@ -98,8 +108,13 @@ public class PlaybackActivity extends AppCompatActivity {
 
     private void share() {
         try {
-            Uri uri = FileProvider.getUriForFile(
-                    this, getPackageName() + ".fileprovider", file);
+            Uri uri;
+            if (mediaUri != null && "content".equals(mediaUri.getScheme())) {
+                uri = mediaUri;   // gallery item — share directly with a read grant
+            } else {
+                uri = FileProvider.getUriForFile(
+                        this, getPackageName() + ".fileprovider", file);
+            }
             Intent send = new Intent(Intent.ACTION_SEND);
             send.setType("video/mp4");
             send.putExtra(Intent.EXTRA_STREAM, uri);

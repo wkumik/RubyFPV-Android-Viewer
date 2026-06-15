@@ -53,13 +53,22 @@ public final class Thumbs {
     }
 
     public static Meta extract(Context ctx, File file, String stem) {
-        Meta m = new Meta();
         String id = stem != null ? stem : file.getName();
         DebugLog.add("extract " + id + " (" + file.length() + " B)");
+        return finish(frame(ctx, Uri.fromFile(file)), stem, id);
+    }
 
-        m.bitmap = frame(ctx, file);
+    /** {@link #extract(Context, File, String)} but sourced from a {@code content://} Uri. */
+    public static Meta extract(Context ctx, Uri uri, String stem) {
+        String id = stem != null ? stem : String.valueOf(uri);
+        DebugLog.add("extract " + id + " (uri)");
+        return finish(frame(ctx, uri), stem, id);
+    }
+
+    private static Meta finish(Bitmap bmp, String stem, String id) {
+        Meta m = new Meta();
+        m.bitmap = bmp;
         DebugLog.add("  media3-frame: " + (m.bitmap != null ? "OK" : "null"));
-
         if (m.bitmap != null) {
             m.bitmap = scale(m.bitmap);
             if (stem != null) CACHE.put(stem, m.bitmap);
@@ -70,17 +79,22 @@ public final class Thumbs {
         return m;
     }
 
+    /** Decode the first frame from a file. */
+    public static Bitmap frame(Context ctx, File file) {
+        return frame(ctx, Uri.fromFile(file));
+    }
+
     /**
      * Decode the first frame via media3's ExoPlayer pipeline. Safe to call from a
      * plain background thread (the extractor runs its own internal playback looper);
      * blocks until the frame is ready or {@link #FRAME_TIMEOUT_S} elapses.
      */
-    private static Bitmap frame(Context ctx, File file) {
+    public static Bitmap frame(Context ctx, Uri uri) {
         ExperimentalFrameExtractor fe = new ExperimentalFrameExtractor(
                 ctx.getApplicationContext(),
                 new ExperimentalFrameExtractor.Configuration.Builder().build());
         try {
-            fe.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)),
+            fe.setMediaItem(MediaItem.fromUri(uri),
                     Collections.<Effect>emptyList());
             ListenableFuture<ExperimentalFrameExtractor.Frame> future = fe.getFrame(0);
             ExperimentalFrameExtractor.Frame f = future.get(FRAME_TIMEOUT_S, TimeUnit.SECONDS);

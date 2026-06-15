@@ -37,7 +37,7 @@
 
     <string name="state_on_drone">On drone</string>
     <string name="state_downloading">Downloading… %1$d%%</string>
-    <string name="state_remuxing">Preparing…</string>
+    <string name="state_remuxing">Converting to MP4…</string>
     <string name="state_ready">Ready to play</string>
     <string name="state_failed">Failed</string>
 

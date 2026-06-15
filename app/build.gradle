@@ -10,8 +10,8 @@ android {
         applicationId "com.rubyfpv.viewer"
         minSdk 24
         targetSdk 35
-        versionCode 8
-        versionName "1.6"
+        versionCode 10
+        versionName "2.0"
     }
 
     buildFeatures {

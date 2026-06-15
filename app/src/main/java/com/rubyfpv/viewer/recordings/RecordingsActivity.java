@@ -5,7 +5,10 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -18,6 +21,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -87,6 +92,14 @@ public class RecordingsActivity extends AppCompatActivity
     private File dir;
     private File thumbsDir;
     private File cacheDir;
+
+    /** Read-media permission so the gallery scan can see clips a PRIOR install created. */
+    private final ActivityResultLauncher<String> readMediaPerm =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                DebugLog.add("read-media permission " + (granted ? "granted" : "denied"));
+                // Items the current install created are queryable regardless; rescan either way.
+                loadLocal();
+            });
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -161,7 +174,24 @@ public class RecordingsActivity extends AppCompatActivity
         });
 
         loadLocal();
+        requestReadMediaIfNeeded();
         setStatus(StatusKind.OFFLINE, getString(R.string.status_disconnected));
+    }
+
+    /**
+     * Request the read-media permission (non-blocking) so the gallery scan can list
+     * clips created by a PRIOR install. If denied we still proceed: clips this install
+     * created remain queryable without the permission.
+     */
+    private void requestReadMediaIfNeeded() {
+        final String perm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ? android.Manifest.permission.READ_MEDIA_VIDEO
+                : android.Manifest.permission.READ_EXTERNAL_STORAGE;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                && ContextCompat.checkSelfPermission(this, perm)
+                != PackageManager.PERMISSION_GRANTED) {
+            readMediaPerm.launch(perm);
+        }
     }
 
     /** Pad the app bar for the status bar and the list for the nav bar (edge-to-edge). */
@@ -435,43 +465,124 @@ public class RecordingsActivity extends AppCompatActivity
     // ── Local scan ──────────────────────────────────────────────────────
 
     private void loadLocal() {
+        // 1) The gallery (Movies/RubyFPV) is the store of record — scan it first.
+        List<GalleryStore.GalleryItem> items = GalleryStore.query(getApplicationContext());
+        for (GalleryStore.GalleryItem g : items) {
+            if (g.stem == null || g.stem.isEmpty()) continue;
+            Recording r = byStem.get(g.stem);
+            if (r == null) { r = new Recording(g.stem); byStem.put(g.stem, r); }
+            r.localUri = g.uri;
+            r.localFile = null;
+            if (g.durationMs > 0) r.durationMs = g.durationMs;
+            if (g.mtimeEpochSec > 0) r.mtimeEpoch = g.mtimeEpochSec;
+            r.state = Recording.State.READY;
+        }
+        for (Recording r : byStem.values()) {
+            if (r.state == Recording.State.READY && r.localUri != null) extractMeta(r);
+        }
+        refreshUi();
+
+        // 2) Best-effort migration of any leftover private files (older builds /
+        //    interrupted publish). Normally zero on this device; never fatal.
+        migratePrivateLeftovers();
+    }
+
+    /**
+     * Move any clips still sitting in the app-private {@code dir} (from older builds
+     * or a publish interrupted mid-write) into the gallery, then delete the private
+     * copy. Purges {@code .part} and 0-byte leftovers. Runs scans on {@link #work}.
+     */
+    private void migratePrivateLeftovers() {
         File[] files = dir.listFiles();
         if (files == null) return;
         for (File f : files) {
             String name = f.getName();
+            if (name.endsWith(".part")) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                continue;
+            }
             boolean mp4 = name.endsWith(".mp4");
             boolean ts = name.endsWith(".ts");
             if (!mp4 && !ts) continue;
-            // Purge stray 0-byte .mp4s left by older builds' failed remux attempts
-            // (the framework muxer creates the output before discovering it can't
-            // demux HEVC-TS). A 0-byte file would otherwise become the "playable"
-            // file and ExoPlayer would report container-unsupported.
             if (f.length() == 0) {
                 //noinspection ResultOfMethodCallIgnored
-                if (mp4) f.delete();
+                f.delete();
                 continue;
             }
             String stem = name.substring(0, name.lastIndexOf('.'));
-            Recording r = byStem.get(stem);
+            Recording existing = byStem.get(stem);
+            // Already published to the gallery? Drop the private dup.
+            if (existing != null && existing.localUri != null) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                continue;
+            }
+            Recording r = existing;
             if (r == null) { r = new Recording(stem); byStem.put(stem, r); }
-            // Prefer the .ts: ExoPlayer plays HEVC-in-TS directly. Only fall back
-            // to a (non-empty) .mp4 if no .ts is present.
-            if (ts || r.localFile == null) r.localFile = f;
-            r.state = Recording.State.READY;
-            r.mtimeEpoch = f.lastModified() / 1000L;
-        }
-        // lazily extract thumbnails/durations for ready clips
-        for (Recording r : byStem.values()) {
-            if (r.state == Recording.State.READY && r.localFile != null) extractMeta(r);
+            // Prefer migrating the .mp4 if both exist; the .ts is handled below.
+            if (mp4) {
+                r.localFile = f;
+                r.state = Recording.State.REMUXING;
+                final Recording fr = r;
+                final File ff = f;
+                ui.post(() -> adapter.update(fr));
+                work.execute(() -> publishAndFinalize(fr, ff));
+            } else { // .ts and no sibling .mp4 being migrated
+                if (new File(dir, stem + ".mp4").exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    f.delete();   // .mp4 sibling will be migrated instead
+                    continue;
+                }
+                r.localFile = f;
+                convertLocal(r);
+            }
         }
         refreshUi();
     }
 
+    /**
+     * Publish an already-converted private {@code mp4} into the gallery, delete the
+     * private copy on success, extract the thumbnail and mark READY. On failure keep
+     * the private {@code mp4} as the playable/shareable fallback. Runs on {@link #work}.
+     */
+    private void publishAndFinalize(Recording r, File mp4) {
+        Uri uri = GalleryStore.publish(getApplicationContext(), mp4, r.stem + ".mp4");
+        if (uri != null) {
+            //noinspection ResultOfMethodCallIgnored
+            mp4.delete();
+            Thumbs.Meta m = Thumbs.extract(getApplicationContext(), uri, r.stem);
+            if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
+            final long durMs = m.durationMs;
+            ui.post(() -> {
+                r.localUri = uri;
+                r.localFile = null;
+                if (durMs > 0) r.durationMs = durMs;
+                r.state = Recording.State.READY;
+                adapter.update(r);
+            });
+        } else {
+            Thumbs.Meta m = Thumbs.extract(getApplicationContext(), mp4, r.stem);
+            if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
+            final long durMs = m.durationMs;
+            ui.post(() -> {
+                r.localFile = mp4;
+                if (durMs > 0) r.durationMs = durMs;
+                r.state = Recording.State.READY;
+                adapter.update(r);
+            });
+        }
+    }
+
     private void extractMeta(Recording r) {
         if (Thumbs.CACHE.get(r.stem) != null && r.durationMs > 0) return;
+        final Uri uri = r.localUri;
         final File f = r.localFile;
+        if (uri == null && f == null) return;
         work.execute(() -> {
-            Thumbs.Meta m = Thumbs.extract(getApplicationContext(), f, r.stem);
+            Thumbs.Meta m = uri != null
+                    ? Thumbs.extract(getApplicationContext(), uri, r.stem)
+                    : Thumbs.extract(getApplicationContext(), f, r.stem);
             if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
             ui.post(() -> {
                 if (m.durationMs > 0) r.durationMs = m.durationMs;
@@ -526,40 +637,111 @@ public class RecordingsActivity extends AppCompatActivity
     }
 
     /**
-     * Finalise a freshly-downloaded clip. The {@code .ts} is the playable file:
-     * ExoPlayer demuxes HEVC-in-TS directly, so there is no remux step (the
-     * framework muxer can't demux HEVC-TS and would only leave a 0-byte .mp4).
+     * Finalise a freshly-downloaded clip: remux the {@code .ts} into a share-ready
+     * {@code .mp4} (social apps reject MPEG-TS), then extract the thumbnail. The
+     * caller has already moved the row to {@link Recording.State#REMUXING}.
      */
     private void finishDownload(Recording r, File ts) {
-        work.execute(() -> {
-            Thumbs.Meta m = Thumbs.extract(getApplicationContext(), ts, r.stem);
-            if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
-            ui.post(() -> {
-                r.localFile = ts;
-                if (m.durationMs > 0) r.durationMs = m.durationMs;
-                r.state = Recording.State.READY;
-                adapter.update(r);
-            });
+        work.execute(() -> remuxAndFinalize(r, ts));
+    }
+
+    /**
+     * Upgrade a clip that is still backed locally by a {@code .ts} (downloaded by
+     * an older build) to a shareable {@code .mp4}, in the background.
+     */
+    private void convertLocal(Recording r) {
+        final File ts = r.localFile;
+        ui.post(() -> { r.state = Recording.State.REMUXING; adapter.update(r); });
+        work.execute(() -> remuxAndFinalize(r, ts));
+    }
+
+    /**
+     * Remux {@code ts} → a staged {@code stem.mp4} (HEVC stream-copy), then publish it
+     * into the gallery ({@code Movies/RubyFPV}) as the store of record and delete both
+     * staged private files. Extracts the thumbnail and marks READY.
+     *
+     * <p>Fallbacks (private file kept, {@code localUri} stays null):</p>
+     * <ul>
+     *   <li>publish fails → keep staged {@code .mp4} as playable/shareable;</li>
+     *   <li>remux fails → keep the {@code .ts} as playable/shareable.</li>
+     * </ul>
+     * Runs on {@link #work}.
+     */
+    private void remuxAndFinalize(Recording r, File ts) {
+        File mp4 = new File(dir, r.stem + ".mp4");
+        if (Mp4Export.remux(getApplicationContext(), ts, mp4)) {
+            //noinspection ResultOfMethodCallIgnored
+            ts.delete();
+            Uri uri = GalleryStore.publish(getApplicationContext(), mp4, r.stem + ".mp4");
+            if (uri != null) {
+                //noinspection ResultOfMethodCallIgnored
+                mp4.delete();
+                Thumbs.Meta m = Thumbs.extract(getApplicationContext(), uri, r.stem);
+                if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
+                final long durMs = m.durationMs;
+                ui.post(() -> {
+                    r.localUri = uri;
+                    r.localFile = null;
+                    if (durMs > 0) r.durationMs = durMs;
+                    r.state = Recording.State.READY;
+                    adapter.update(r);
+                });
+                return;
+            }
+            // Publish failed — keep the staged .mp4 as the fallback.
+            DebugLog.add("publish returned null, keeping private mp4 for " + r.stem);
+            finalizeFallback(r, mp4);
+            return;
+        }
+        // Remux failed — keep the .ts as the playable/shareable fallback.
+        finalizeFallback(r, ts);
+    }
+
+    /** Mark READY backed by a private file (publish/remux fallback path). */
+    private void finalizeFallback(Recording r, File pf) {
+        Thumbs.Meta m = Thumbs.extract(getApplicationContext(), pf, r.stem);
+        if (m.bitmap != null) Thumbs.saveDisk(thumbsDir, r.stem, m.bitmap);
+        final long durMs = m.durationMs;
+        ui.post(() -> {
+            r.localFile = pf;
+            r.localUri = null;
+            if (durMs > 0) r.durationMs = durMs;
+            r.state = Recording.State.READY;
+            adapter.update(r);
         });
     }
 
     @Override
     public void onPlay(Recording r) {
-        if (r.localFile == null || !r.localFile.exists()) return;
         Intent i = new Intent(this, PlaybackActivity.class);
-        i.putExtra(PlaybackActivity.EXTRA_PATH, r.localFile.getAbsolutePath());
+        if (r.localUri != null) {
+            i.putExtra(PlaybackActivity.EXTRA_URI, r.localUri.toString());
+        } else if (r.localFile != null && r.localFile.exists()) {
+            i.putExtra(PlaybackActivity.EXTRA_PATH, r.localFile.getAbsolutePath());
+        } else {
+            return;
+        }
         i.putExtra(PlaybackActivity.EXTRA_TITLE, r.stem);
         startActivity(i);
     }
 
     @Override
     public void onShare(Recording r) {
-        if (r.localFile == null || !r.localFile.exists()) return;
         try {
-            android.net.Uri uri = FileProvider.getUriForFile(
-                    this, getPackageName() + ".fileprovider", r.localFile);
+            Uri uri;
+            String type;
+            if (r.localUri != null) {
+                uri = r.localUri;          // gallery item — share directly
+                type = "video/mp4";
+            } else if (r.localFile != null && r.localFile.exists()) {
+                uri = FileProvider.getUriForFile(
+                        this, getPackageName() + ".fileprovider", r.localFile);
+                type = mimeFor(r.localFile);
+            } else {
+                return;
+            }
             Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType(mimeFor(r.localFile));
+            send.setType(type);
             send.putExtra(Intent.EXTRA_STREAM, uri);
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(Intent.createChooser(send, getString(R.string.share_title)));
@@ -711,6 +893,13 @@ public class RecordingsActivity extends AppCompatActivity
     }
 
     private void deleteLocal(Recording r) {
+        // Primary store of record: the gallery item.
+        if (r.localUri != null) {
+            final Uri uri = r.localUri;
+            work.execute(() -> GalleryStore.delete(getApplicationContext(), uri));
+            r.localUri = null;
+        }
+        // Any private staged/fallback files.
         File[] victims = {
                 r.localFile,
                 new File(dir, r.stem + ".mp4"),
