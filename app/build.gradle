@@ -10,15 +10,19 @@ android {
         applicationId "com.rubyfpv.viewer"
         minSdk 24
         targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        versionCode 10
+        versionName "2.0"
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
         release {
             minifyEnabled = true
             shrinkResources = true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 
@@ -26,4 +30,21 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    // Stamp the version into the APK filename, e.g. RubyFPV-v1.2-b3-debug.apk
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "RubyFPV-v${variant.versionName}-b${variant.versionCode}-${variant.buildType.name}.apk"
+        }
+    }
+}
+
+dependencies {
+    implementation libs.material
+    implementation libs.constraintlayout
+    implementation libs.swiperefreshlayout
+    implementation libs.jsch
+    implementation libs.media3.exoplayer
+    implementation libs.media3.ui
+    implementation libs.media3.transformer
 }

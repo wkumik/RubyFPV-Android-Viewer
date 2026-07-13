@@ -1,3 +1,72 @@
 <resources>
-    <string name="app_name">RubyFPV Viewer</string>
+    <string name="app_name">RubyFPV</string>
+
+    <string name="recordings_title">Recordings</string>
+    <string name="menu_live_view">Live view (USB)</string>
+    <string name="menu_connection">Connection settings</string>
+    <string name="menu_diagnostics">Diagnostics</string>
+    <string name="menu_refresh">Refresh</string>
+    <string name="menu_layout">Grid / list</string>
+
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="join_wifi">Join drone Wi-Fi</string>
+
+    <string name="status_disconnected">Not connected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connected">Connected to %1$s</string>
+    <string name="status_error">Connection failed</string>
+    <string name="status_return_fpv">Drone returning to FPV mode…</string>
+
+    <string name="menu_return_fpv">Return to FPV mode</string>
+    <string name="return_fpv_title">Return to FPV mode?</string>
+    <string name="return_fpv_message">This reboots the drone out of phone-transfer mode and back into normal flight/FPV mode. The Wi-Fi hotspot will disconnect and the drone will be ready to fly again in about 45 seconds.</string>
+    <string name="return_fpv_confirm">Reboot to FPV</string>
+    <string name="return_fpv_need_connection">Connect to the drone first.</string>
+
+    <string name="empty_disconnected_title">Connect to your drone</string>
+    <string name="empty_disconnected_body">Put the drone in phone-transfer mode, join its Wi-Fi, then connect to browse onboard recordings.</string>
+    <string name="empty_none_title">No recordings found</string>
+    <string name="empty_none_body">Nothing on the drone SD card yet. Record some flights, then refresh.</string>
+
+    <string name="action_download">Download</string>
+    <string name="action_play">Play</string>
+    <string name="action_share">Share</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_open_folder">On device</string>
+
+    <string name="state_on_drone">On drone</string>
+    <string name="state_downloading">Downloading… %1$d%%</string>
+    <string name="state_remuxing">Converting to MP4…</string>
+    <string name="state_ready">Ready to play</string>
+    <string name="state_failed">Failed</string>
+
+    <string name="settings_title">Connection</string>
+    <string name="settings_host">Drone address</string>
+    <string name="settings_user">Username</string>
+    <string name="settings_pass">Password</string>
+    <string name="settings_save">Save</string>
+    <string name="cancel">Cancel</string>
+
+    <string name="delete_title">Delete recording?</string>
+    <string name="delete_drone_body">Delete \"%1$s\" from the drone SD card? The downloaded copy on this phone is kept.</string>
+    <string name="delete_phone_body">Remove the downloaded copy of \"%1$s\" from this phone? The recording on the drone SD card is kept.</string>
+    <string name="delete_both_body">Delete \"%1$s\" from both this phone and the drone SD card? This cannot be undone.</string>
+    <string name="delete_phone_only">Delete from phone</string>
+    <string name="delete_sd_only">Delete from SD card</string>
+    <string name="delete_both">Delete from both</string>
+    <string name="delete_local_only">Remove local copy</string>
+    <string name="delete_confirm">Delete</string>
+
+    <string name="menu_delete">Delete selected</string>
+    <string name="selected_count">%1$d selected</string>
+    <string name="delete_selected_title">Delete %1$d recordings?</string>
+    <string name="delete_selected_body">Delete %1$d recordings from the %2$s? This cannot be undone.</string>
+    <string name="delete_where_phone">phone</string>
+    <string name="delete_where_sd">drone SD card</string>
+    <string name="delete_where_both">phone and drone SD card</string>
+
+    <string name="share_title">Share recording</string>
+    <string name="toast_no_player">No video player available</string>
+    <string name="toast_share_failed">Could not share file</string>
 </resources>

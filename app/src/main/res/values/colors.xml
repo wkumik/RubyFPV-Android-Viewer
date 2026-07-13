@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Ruby brand -->
+    <color name="ruby">#E0344A</color>
+    <color name="ruby_dark">#B5263A</color>
+    <color name="ruby_on">#FFFFFF</color>
+
+    <!-- Dark surfaces -->
+    <color name="bg">#0F1113</color>
+    <color name="surface">#1A1D21</color>
+    <color name="surface_variant">#23272C</color>
+    <color name="outline">#33383F</color>
+
+    <!-- Text -->
+    <color name="text_primary">#F2F4F6</color>
+    <color name="text_secondary">#9AA3AD</color>
+    <color name="text_disabled">#5A626B</color>
+
+    <!-- Status -->
+    <color name="status_online">#34C759</color>
+    <color name="status_busy">#FFB020</color>
+    <color name="status_offline">#6B7280</color>
+
+    <color name="scrim">#CC000000</color>
+</resources>
